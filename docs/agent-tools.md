@@ -76,7 +76,7 @@ Discover, read, and message other running threads. Project threads coordinate on
 | `threads_wait` | `threadId`, `timeoutSeconds?` | Waits until a target thread becomes idle. |
 | `threads_send_message` | `threadId`, `message` | Queues a message on another thread and triggers it. |
 | `threads_archive` | `threadId`, `confirm?`, `elevatedProjectId?` | Saves and removes a completed thread. Archiving any referenced orchestrator requires `confirm: true`. |
-| `threads_set_notes` | `threadId`, `notes` | Sets owner-scoped orchestrator tracking notes with source/timestamp provenance. |
+| `threads_set_notes` | `threadId`, `notes`, `elevatedProjectId?` | Sets owner-scoped orchestrator tracking notes with source/timestamp provenance. The Portfolio Orchestrator may pass `elevatedProjectId` to write notes for a Project thread only while that Project's orchestrator is disabled. |
 | `threads_set_proposed_reply` | `threadId`, `text` | Stages a proposed reply for human approval. |
 | `threads_clear_proposed_reply` | `threadId` | Clears a stale proposed reply. |
 | `threads_post_decision` | `threadId?`, `question`, `header?`, `options` (2-4), `multiSelect?`, `allowOther?` | Asks Rick to decide, inline on the thread's Agent Board card (default: the calling thread). Rick's answer is delivered to the **calling** thread as a user message, never to the target thread. Returns a `decisionId`. |

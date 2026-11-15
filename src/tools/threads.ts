@@ -464,13 +464,13 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     'obsidian_set_thread_notes',
     [
       'Sets (overwrites) a thread\'s orchestrator tracking notes — free-form text for',
-      'inferred goal, status, and a last-reviewed cursor. Visible in the UI but never',
+      'inferred goal, strategy, status, and a last-reviewed cursor. Visible in the UI but never',
       'injected into any session\'s context. Pass an empty string to clear.',
     ].join(' '),
     {
       threadId: z.string().describe('ID of the thread to annotate'),
       notes: z.string().describe('Tracking notes text. Pass an empty string to clear existing notes.'),
-      elevatedProjectId: z.string().optional().describe('Reserved for explicit portfolio reads; portfolio elevation cannot write Project notes.'),
+      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation when that Project\'s orchestrator is disabled.'),
     },
     async (args, _extra) => {
       try {

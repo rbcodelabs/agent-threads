@@ -899,8 +899,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
             const caller = this.manager.getThread(threadId);
             const target = this.manager.getThread(targetId);
             if (!caller || !target) return false;
-            const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, this.manager.getProjects());
-            if (operation === 'notes') return canWriteManagerNotes(role, target.projectId);
+            const projects = this.manager.getProjects();
+            const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, projects);
+            if (operation === 'notes') return canWriteManagerNotes(role, target.projectId, { elevatedProjectId, projects });
             return authorizeThreadAccess(role, target.projectId, elevatedProjectId);
           },
           authorizeProjectDestination: (projectId, elevatedProjectId, targetThreadId) => {

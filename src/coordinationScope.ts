@@ -60,8 +60,17 @@ export function authorizeProjectAssignment(
   return authorizeThreadAccess(caller, targetProjectId, options.elevatedProjectId);
 }
 
-export function canWriteManagerNotes(caller: CoordinationRole, targetProjectId: string | undefined): boolean {
-  if (caller.kind === 'portfolio') return targetProjectId === undefined;
+export function canWriteManagerNotes(
+  caller: CoordinationRole,
+  targetProjectId: string | undefined,
+  options?: { elevatedProjectId?: string; projects?: readonly OrchestratedProjectRef[] },
+): boolean {
+  if (caller.kind === 'portfolio') {
+    if (targetProjectId === undefined) return true;
+    if (options?.elevatedProjectId !== targetProjectId) return false;
+    const project = options.projects?.find(candidate => candidate.id === targetProjectId);
+    return project?.orchestratorEnabled === false;
+  }
   return caller.kind === 'project-orchestrator' && targetProjectId === caller.projectId;
 }
 

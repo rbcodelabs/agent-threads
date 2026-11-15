@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, repairStaleProjectOrchestrators, resolveCoordinationRole } from '../../src/coordinationScope';
+import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, canWriteManagerNotes, repairStaleProjectOrchestrators, resolveCoordinationRole } from '../../src/coordinationScope';
 
 const projects = [
   { id: 'project-a', orchestratorThreadId: 'orch-a' },
@@ -120,5 +120,57 @@ describe('coordination scope', () => {
     const mutableProjects = [{ id: 'b', orchestratorThreadId: 'orch-b', orchestratorEnabled: true }];
     const items = [{ isOrchestratorHeartbeat: true, targetThreadId: 'orch-b' }];
     expect(repairStaleProjectOrchestrators(mutableProjects, () => 'b', items, 'portfolio')).toBe(false);
+  });
+
+  describe('canWriteManagerNotes', () => {
+    const noteProjects = [
+      { id: 'disabled-fresh', orchestratorEnabled: false },
+      { id: 'disabled-toggled', orchestratorThreadId: 'orch-a', orchestratorEnabled: false },
+      { id: 'enabled-explicit', orchestratorThreadId: 'orch-b', orchestratorEnabled: true },
+      { id: 'enabled-legacy', orchestratorThreadId: 'orch-c' },
+    ];
+
+    it('lets portfolio write notes on unassigned threads with or without options', () => {
+      const portfolio = { kind: 'portfolio' as const };
+      expect(canWriteManagerNotes(portfolio, undefined)).toBe(true);
+      expect(canWriteManagerNotes(portfolio, undefined, {})).toBe(true);
+      expect(canWriteManagerNotes(portfolio, undefined, { elevatedProjectId: 'disabled-fresh', projects: noteProjects })).toBe(true);
+    });
+
+    it('lets portfolio write notes on a disabled Project thread with matching elevatedProjectId', () => {
+      const portfolio = { kind: 'portfolio' as const };
+      expect(canWriteManagerNotes(portfolio, 'disabled-fresh', { elevatedProjectId: 'disabled-fresh', projects: noteProjects })).toBe(true);
+      expect(canWriteManagerNotes(portfolio, 'disabled-toggled', { elevatedProjectId: 'disabled-toggled', projects: noteProjects })).toBe(true);
+    });
+
+    it('denies portfolio writes to a disabled Project without matching elevatedProjectId or project list', () => {
+      const portfolio = { kind: 'portfolio' as const };
+      expect(canWriteManagerNotes(portfolio, 'disabled-fresh')).toBe(false);
+      expect(canWriteManagerNotes(portfolio, 'disabled-fresh', { projects: noteProjects })).toBe(false);
+      expect(canWriteManagerNotes(portfolio, 'disabled-fresh', { elevatedProjectId: 'disabled-toggled', projects: noteProjects })).toBe(false);
+      expect(canWriteManagerNotes(portfolio, 'disabled-fresh', { elevatedProjectId: 'disabled-fresh' })).toBe(false);
+    });
+
+    it('denies portfolio writes to enabled or legacy Projects even with matching elevatedProjectId', () => {
+      const portfolio = { kind: 'portfolio' as const };
+      expect(canWriteManagerNotes(portfolio, 'enabled-explicit', { elevatedProjectId: 'enabled-explicit', projects: noteProjects })).toBe(false);
+      expect(canWriteManagerNotes(portfolio, 'enabled-legacy', { elevatedProjectId: 'enabled-legacy', projects: noteProjects })).toBe(false);
+    });
+
+    it('restricts project-orchestrator note writes strictly to its own Project', () => {
+      const orchestrator = { kind: 'project-orchestrator' as const, projectId: 'enabled-explicit' };
+      expect(canWriteManagerNotes(orchestrator, 'enabled-explicit')).toBe(true);
+      expect(canWriteManagerNotes(orchestrator, 'disabled-fresh', { elevatedProjectId: 'disabled-fresh', projects: noteProjects })).toBe(false);
+      expect(canWriteManagerNotes(orchestrator, undefined)).toBe(false);
+    });
+
+    it('denies manager note writes for project-member and unassigned roles', () => {
+      const member = { kind: 'project-member' as const, projectId: 'enabled-explicit' };
+      const unassigned = { kind: 'unassigned' as const };
+      expect(canWriteManagerNotes(member, 'enabled-explicit')).toBe(false);
+      expect(canWriteManagerNotes(member, undefined)).toBe(false);
+      expect(canWriteManagerNotes(unassigned, undefined)).toBe(false);
+      expect(canWriteManagerNotes(unassigned, 'disabled-fresh', { elevatedProjectId: 'disabled-fresh', projects: noteProjects })).toBe(false);
+    });
   });
 });
