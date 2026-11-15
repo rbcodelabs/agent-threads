@@ -177,17 +177,17 @@ export interface HarnessProbe {
   signedIn: boolean;
 }
 
-export type HarnessProbeResult = Partial<Record<'claude' | 'codex' | 'opencode', HarnessProbe>>;
+export type HarnessProbeResult = Partial<Record<'claude' | 'codex' | 'opencode' | 'antigravity', HarnessProbe>>;
 
 /** Parse `HARNESS_PROBE_SCRIPT` output. Unknown lines are ignored; null when nothing was recognised. */
 export function parseHarnessProbe(stdout: string): HarnessProbeResult | null {
   const out: HarnessProbeResult = {};
   let seen = false;
   for (const line of stdout.split('\n')) {
-    const m = /^(claude|codex|opencode)\.(cli|auth)=([01])\s*$/.exec(line.trim());
+    const m = /^(claude|codex|opencode|antigravity)\.(cli|auth)=([01])\s*$/.exec(line.trim());
     if (!m) continue;
     seen = true;
-    const h = m[1] as 'claude' | 'codex' | 'opencode';
+    const h = m[1] as 'claude' | 'codex' | 'opencode' | 'antigravity';
     const entry = out[h] ?? { cli: false, signedIn: false };
     if (m[2] === 'cli') entry.cli = m[3] === '1'; else entry.signedIn = m[3] === '1';
     out[h] = entry;
@@ -207,4 +207,14 @@ export function parseDeviceLogin(output: string): { url?: string; code?: string 
   const url = /https:\/\/[^\s)'"]+/.exec(text)?.[0];
   const code = /\b[A-Z0-9]{4,}-[A-Z0-9]{4,}\b/.exec(text)?.[0];
   return { ...(url ? { url } : {}), ...(code ? { code } : {}) };
+}
+
+/**
+ * What `agy acp --login` prints: a Google OAuth URL and a prompt to paste the authorization code or callback URL.
+ */
+export function parseAntigravityLogin(output: string): { url?: string; waitingForCode: boolean } {
+  const text = output.replace(ANSI, '');
+  const url = /https:\/\/[^\s)'"]+/.exec(text)?.[0];
+  const waitingForCode = /paste the authorization code|authorization code.*press enter|enter.*authorization code/i.test(text);
+  return { ...(url ? { url } : {}), waitingForCode };
 }

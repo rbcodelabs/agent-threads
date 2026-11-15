@@ -5,13 +5,19 @@ import { describe, it, expect, vi } from 'vitest';
 import { makeHarness } from '../helpers/localDaemonHarness';
 import { snap } from '../helpers/localDaemonSnap';
 import { assess, type Desired, type Observed } from '../../src/localDaemon/assess';
-import { signInToCodexInContainer, type DeviceLoginOptions } from '../../src/localDaemon/harnessLogin';
-import { parseDeviceLogin, parseHarnessProbe } from '../../src/localDaemon/parse';
+import {
+  signInToAntigravityInContainer,
+  signInToCodexInContainer,
+  type AntigravityLoginOptions,
+  type DeviceLoginOptions,
+} from '../../src/localDaemon/harnessLogin';
+import { parseAntigravityLogin, parseDeviceLogin, parseHarnessProbe } from '../../src/localDaemon/parse';
 import { LocalDaemonError } from '../../src/localDaemon/provision';
 import {
   THIN_DOCKERFILE,
   WITH_CLAUDE_STAGE_BODY,
   WITH_HARNESSES_STAGE_BODY,
+  antigravityLoginArgs,
   buildThinImageArgs,
   codexLoginArgs,
   harnessProbeArgs,
@@ -32,7 +38,7 @@ import { buildHarnessRows, buildLocalDaemonView, describeSetup, describeUpdate }
 import { CONTAINER_AUTH_TOKEN_SECRET } from '../../src/claudeContainerAuthCli';
 
 const root = resolve(__dirname, '../..');
-const ALL = ['claude', 'codex', 'opencode'] as const;
+const ALL = ['claude', 'codex', 'opencode', 'antigravity'] as const;
 const spec: LocalDaemonSpec = { vaultPath: '/Users/user/Vault', version: '0.65.0', hostPort: 7433, maskedDirs: ['.geode'], memory: '4G', cpus: 4 };
 
 describe('harness set', () => {
@@ -121,14 +127,16 @@ describe('the thin Dockerfile', () => {
     const all = args([...ALL]);
     expect(all).toContain('INSTALL_CODEX=1');
     expect(all).toContain('INSTALL_OPENCODE=1');
-    expect(all[all.indexOf('--tag') + 1]).toBe('agent-threads-daemon-local:0.65.0-claude-codex-opencode');
+    expect(all).toContain('INSTALL_ANTIGRAVITY=1');
+    expect(all[all.indexOf('--tag') + 1]).toBe('agent-threads-daemon-local:0.65.0-claude-codex-opencode-antigravity');
     expect(args(['codex'])).toContain('INSTALL_CODEX=1');
     expect(args(['codex'])).not.toContain('INSTALL_OPENCODE=1');
+    expect(args(['codex'])).not.toContain('INSTALL_ANTIGRAVITY=1');
   });
 
-  it('verifies the CLIs the set needs', () => {
+  it('verifies the CLIs the set needs (using agy for antigravity)', () => {
     expect(verifyImageArgs('0.65.0').at(-1)).toBe('command -v claude && command -v agent-threads && command -v git && echo LOCAL_DAEMON_IMAGE_OK');
-    expect(verifyImageArgs('0.65.0', ['codex', 'opencode']).at(-1)).toBe('command -v codex && command -v opencode && command -v agent-threads && command -v git && echo LOCAL_DAEMON_IMAGE_OK');
+    expect(verifyImageArgs('0.65.0', ['codex', 'opencode', 'antigravity']).at(-1)).toBe('command -v codex && command -v opencode && command -v agy && command -v agent-threads && command -v git && echo LOCAL_DAEMON_IMAGE_OK');
   });
 });
 
@@ -144,19 +152,25 @@ describe('probe and login plumbing', () => {
     const script = harnessProbeArgs('c').at(-1)!;
     expect(script).toContain('-s /var/lib/agent-threads/home/.codex/auth.json');
     expect(script).toContain('-s /var/lib/agent-threads/home/.local/share/opencode/auth.json');
+    expect(script).toContain('-s /var/lib/agent-threads/home/.gemini/jetski-standalone-oauth-token');
     expect(script).not.toMatch(/\bcat\b|\bhead\b|\bbase64\b/);
     expect(harnessProbeArgs('c').slice(0, 5)).toEqual(['exec', '--user', '10001', 'c', 'sh']);
   });
 
-  it('extracts the device-login URL and code from colored CLI output', () => {
+  it('extracts the device-login URL and code from colored CLI output, and parses agy acp --login output', () => {
     const out = '\u001b[1mWelcome to Codex\u001b[0m\n1. Open this link\n   \u001b[94mhttps://auth.openai.com/codex/device\u001b[0m\n2. Enter this one-time code\n   \u001b[94mABCD-12345\u001b[0m\n';
     expect(parseDeviceLogin(out)).toEqual({ url: 'https://auth.openai.com/codex/device', code: 'ABCD-12345' });
     expect(parseDeviceLogin('starting…')).toEqual({});
+    const agyOut = 'Open this link in a browser to log in with Google:\n\n  https://accounts.google.com/o/oauth2/auth?client_id=123\n\nThen paste the authorization code, or the full URL of the page you land on, and press Enter: ';
+    expect(parseAntigravityLogin(agyOut)).toEqual({ url: 'https://accounts.google.com/o/oauth2/auth?client_id=123', waitingForCode: true });
+    expect(parseAntigravityLogin('starting…')).toEqual({ waitingForCode: false });
   });
 
-  it('gives the exact command for a login that cannot be driven from Settings, quoting the managed CLI path', () => {
+  it('gives the exact command for terminal logins inside the container, quoting the managed CLI path', () => {
     expect(codexLoginArgs('n')).toEqual(['exec', '--user', '10001', 'n', '/opt/harnesses/bin/codex', 'login', '--device-auth']);
+    expect(antigravityLoginArgs('n')).toEqual(['exec', '-i', '--user', '10001', 'n', '/opt/harnesses/bin/agy', 'acp', '--login']);
     expect(manualLoginCommand('opencode', 'agent-threads-local-abcd1234')).toBe('container exec -it --user 10001 agent-threads-local-abcd1234 /opt/harnesses/bin/opencode auth login');
+    expect(manualLoginCommand('antigravity', 'agent-threads-local-abcd1234')).toBe('container exec -it --user 10001 agent-threads-local-abcd1234 /opt/harnesses/bin/agy acp --login');
     expect(manualLoginCommand('codex', 'n', '/Users/u/Library/Application Support/claude-threads/runtime/1.5.0/bin/container'))
       .toBe("'/Users/u/Library/Application Support/claude-threads/runtime/1.5.0/bin/container' exec -it --user 10001 n /opt/harnesses/bin/codex login --device-auth");
   });
@@ -164,7 +178,7 @@ describe('probe and login plumbing', () => {
 
 function fakeChild() {
   const child = Object.assign(new EventEmitter(), {
-    stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { write: vi.fn() }, kill: vi.fn(() => true),
+    stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { write: vi.fn(), end: vi.fn() }, kill: vi.fn(() => true),
   });
   return child;
 }
@@ -218,6 +232,66 @@ describe('signInToCodexInContainer', () => {
   });
 });
 
+describe('signInToAntigravityInContainer', () => {
+  const opts = (child: ReturnType<typeof fakeChild>, over: Partial<AntigravityLoginOptions> = {}) => ({
+    spawn: vi.fn(() => child) as never,
+    hostEnv: {},
+    containerName: 'n',
+    onCodePrompt: async () => '4/0AcvDMrFakeAuthCode123456',
+    ...over,
+  }) as AntigravityLoginOptions;
+
+  it('relays the Google OAuth URL, prompts for the code, writes it to stdin, and succeeds on exit 0', async () => {
+    const child = fakeChild();
+    const onUrl = vi.fn();
+    const onProgress = vi.fn();
+    const onCodePrompt = vi.fn(async () => {
+      setTimeout(() => child.emit('close', 0, null), 0);
+      return '  4/0AcvDMrFakeAuthCode123456  ';
+    });
+    const o = opts(child, { onUrl, onProgress, onCodePrompt });
+    const p = signInToAntigravityInContainer(o);
+    child.stdout.emit('data', 'Open this link in a browser to log in with Google:\n\n  https://accounts.google.com/o/oauth2/auth?client_id=abc\n\nThen paste the authorization code, or the full URL of the page you land on, and press Enter: ');
+    await expect(p).resolves.toEqual({ ok: true });
+    expect(onUrl).toHaveBeenCalledWith('https://accounts.google.com/o/oauth2/auth?client_id=abc');
+    expect(onCodePrompt).toHaveBeenCalledTimes(1);
+    expect(child.stdin.write).toHaveBeenCalledWith('4/0AcvDMrFakeAuthCode123456\n');
+    expect(child.stdin.end).toHaveBeenCalled();
+    expect((o.spawn as unknown as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toEqual(antigravityLoginArgs('n'));
+  });
+
+  it('cancelling the code prompt kills the child and closes stdin without failing silently', async () => {
+    const child = fakeChild();
+    const p = signInToAntigravityInContainer(opts(child, { onCodePrompt: async () => null }));
+    child.stdout.emit('data', 'https://accounts.google.com/o/oauth2/auth\nThen paste the authorization code, or the full URL of the page you land on, and press Enter: ');
+    const r = await p;
+    expect(r).toEqual({ ok: false, error: 'Antigravity sign-in was cancelled.' });
+    expect(child.stdin.end).toHaveBeenCalled();
+    expect(child.kill).toHaveBeenCalled();
+  });
+
+  it('redacts the pasted code and OAuth tokens if the CLI echoes them on failure', async () => {
+    const child = fakeChild();
+    const secretCode = 'https://antigravity.google/oauth-callback?code=4/0AcvDMrSuperSecret999&scope=email';
+    const p = signInToAntigravityInContainer(opts(child, {
+      onCodePrompt: async () => {
+        setTimeout(() => {
+          child.stderr.emit('data', `exchange failed for ${secretCode} and token ya29.a0AfH6SMBxSecretToken123456789\n`);
+          child.emit('close', 1, null);
+        }, 0);
+        return secretCode;
+      },
+    }));
+    child.stdout.emit('data', 'https://accounts.google.com/o/oauth2/auth\nThen paste the authorization code, or the full URL of the page you land on, and press Enter: ');
+    const r = await p;
+    expect(r.ok).toBe(false);
+    const err = (r as { error: string }).error;
+    expect(err).not.toContain('SuperSecret999');
+    expect(err).not.toContain('ya29.a0AfH6SMB');
+    expect(err).toContain('<redacted>');
+  });
+});
+
 // ── assess ───────────────────────────────────────────────────────────────────
 
 const PLUGIN = '0.65.0';
@@ -260,10 +334,13 @@ describe('assess with harness toggles', () => {
 // ── view ─────────────────────────────────────────────────────────────────────
 
 describe('harness rows in the panel view', () => {
-  const probe = (codexAuth: boolean, opencodeAuth = false, cli = { claude: true, codex: true, opencode: true }) => ({
-    claude: { cli: cli.claude, signedIn: false }, codex: { cli: cli.codex, signedIn: codexAuth }, opencode: { cli: cli.opencode, signedIn: opencodeAuth },
+  const probe = (codexAuth: boolean, opencodeAuth = false, cli = { claude: true, codex: true, opencode: true, antigravity: true }, antigravityAuth = false) => ({
+    claude: { cli: cli.claude, signedIn: false },
+    codex: { cli: cli.codex, signedIn: codexAuth },
+    opencode: { cli: cli.opencode, signedIn: opencodeAuth },
+    antigravity: { cli: cli.antigravity, signedIn: antigravityAuth },
   });
-  const rows = (over: Partial<Observed>, extra = {}) => buildHarnessRows(snap(over, { harnesses: ['claude', 'codex', 'opencode'], ...extra }));
+  const rows = (over: Partial<Observed>, extra = {}) => buildHarnessRows(snap(over, { harnesses: ['claude', 'codex', 'opencode', 'antigravity'], ...extra }));
   const row = (r: ReturnType<typeof rows>, id: string) => r.find((x) => x.id === id)!;
 
   it('shows CLI present / signed in per harness from the probe', () => {
@@ -273,17 +350,19 @@ describe('harness rows in the panel view', () => {
     expect(row(r, 'codex').signIn).toBeUndefined();
   });
 
-  it('a Codex login that is missing gets a Sign in button and the manual line; OpenCode gets the line only', () => {
+  it('missing Codex and Antigravity logins get a Sign in button and the manual line; OpenCode gets the line only', () => {
     const r = rows({ harnessProbe: probe(false, false) });
     expect(row(r, 'codex')).toMatchObject({ status: 'CLI installed, not signed in', tone: 'warn', signIn: 'codex' });
     expect(row(r, 'codex').command).toContain('/opt/harnesses/bin/codex login --device-auth');
+    expect(row(r, 'antigravity')).toMatchObject({ status: 'CLI installed, not signed in', tone: 'warn', signIn: 'antigravity' });
+    expect(row(r, 'antigravity').command).toContain('/opt/harnesses/bin/agy acp --login');
     expect(row(r, 'opencode').signIn).toBeUndefined();
     expect(row(r, 'opencode').command).toBe("'/Users/user/Library/Application Support/claude-threads/runtime/1.5.0/bin/container' exec -it --user 10001 agent-threads-local-abcd1234 /opt/harnesses/bin/opencode auth login");
     expect(row(r, 'opencode').status).toMatch(/run this in a terminal/);
   });
 
   it('a toggled-on harness whose CLI is not in the image says to apply changes', () => {
-    const r = rows({ harnessProbe: probe(false, false, { claude: true, codex: false, opencode: true }) });
+    const r = rows({ harnessProbe: probe(false, false, { claude: true, codex: false, opencode: true, antigravity: true }) });
     expect(row(r, 'codex')).toMatchObject({ tone: 'warn', status: expect.stringContaining('Apply changes') });
     expect(row(r, 'codex').signIn).toBeUndefined();
   });
@@ -328,20 +407,21 @@ const CLAUDE = 'sk-ant-oat01-TESTTOKEN';
 const imageOf = (h: ReturnType<typeof makeHarness>, set?: string[]) => h.readState().images[localImageRef(h.pluginVersion, set)];
 
 describe('controller: toggles drive the image and the daemon', () => {
-  it('Set up with all three builds that image, installs the CLIs by build arg, and starts the daemon with that allowed set', async () => {
-    const h = makeHarness({ settings: { enabled: false, port: 7433, harnesses: ['claude', 'codex', 'opencode'] }, secrets: { [CONTAINER_AUTH_TOKEN_SECRET]: CLAUDE } });
+  it('Set up with all four builds that image, installs the CLIs by build arg, and starts the daemon with that allowed set', async () => {
+    const h = makeHarness({ settings: { enabled: false, port: 7433, harnesses: ['claude', 'codex', 'opencode', 'antigravity'] }, secrets: { [CONTAINER_AUTH_TOKEN_SECRET]: CLAUDE } });
     const a = await h.controller.setUp();
     expect(a.status).toBe('running');
-    const built = imageOf(h, ['claude', 'codex', 'opencode']);
-    expect(built).toMatchObject({ built: true, harnesses: ['claude', 'codex', 'opencode'] });
+    const built = imageOf(h, ['claude', 'codex', 'opencode', 'antigravity']);
+    expect(built).toMatchObject({ built: true, harnesses: ['claude', 'codex', 'opencode', 'antigravity'] });
     expect(h.readState().images[localImageRef(h.pluginVersion)]).toBeUndefined();
     const build = h.calls().find((c) => c.startsWith('build'))!;
     expect(build).toContain('INSTALL_CODEX=1');
     expect(build).toContain('INSTALL_OPENCODE=1');
+    expect(build).toContain('INSTALL_ANTIGRAVITY=1');
     const container = Object.values(h.readState().containers)[0]!;
-    expect(container.env).toContain('AGENT_THREADS_HARNESSES=claude,codex,opencode');
-    // a verify ran for every CLI in the set
-    expect(h.calls().some((c) => c.includes('command -v codex') && c.includes('command -v opencode'))).toBe(true);
+    expect(container.env).toContain('AGENT_THREADS_HARNESSES=claude,codex,opencode,antigravity');
+    // a verify ran for every CLI in the set (including `agy` for antigravity)
+    expect(h.calls().some((c) => c.includes('command -v codex') && c.includes('command -v opencode') && c.includes('command -v agy'))).toBe(true);
   });
 
   it('Claude off: Set up needs no Claude sign-in, builds no Claude layer, and ensureRunning does not demand one', async () => {
@@ -421,7 +501,10 @@ describe('controller: per-harness state and sign-in', () => {
     const h = await up();
     let snap1 = await h.controller.snapshot();
     expect(snap1.observed.harnessProbe).toEqual({
-      claude: { cli: true, signedIn: false }, codex: { cli: true, signedIn: false }, opencode: { cli: true, signedIn: false },
+      claude: { cli: true, signedIn: false },
+      codex: { cli: true, signedIn: false },
+      opencode: { cli: true, signedIn: false },
+      antigravity: { cli: false, signedIn: false },
     });
     setAuth(h, { codex: true });
     snap1 = await h.controller.snapshot();
@@ -458,6 +541,26 @@ describe('controller: per-harness state and sign-in', () => {
     expect(calls).toEqual([h.name]);
     expect(onUrl).toHaveBeenCalledWith('https://auth.openai.com/codex/device');
     expect((await h.controller.snapshot()).observed.harnessProbe?.codex.signedIn).toBe(true);
+  });
+
+  it('Antigravity sign-in runs agy acp --login in the container with code prompt and confirms the login landed', async () => {
+    let hh: Awaited<ReturnType<typeof up>>;
+    const h = await up({
+      settings: { enabled: false, port: 7433, harnesses: ['claude', 'antigravity'] },
+      harnessSignIn: async (o) => {
+        expect(o.harness).toBe('antigravity');
+        o.onUrl('https://accounts.google.com/o/oauth2/auth');
+        const code = await o.onCodePrompt?.();
+        expect(code).toBe('4/0AcvDMrCode');
+        setAuth(hh, { antigravity: true });
+        return { ok: true };
+      },
+    });
+    hh = h;
+    const onUrl = vi.fn();
+    await expect(h.controller.signInHarness('antigravity', { onProgress: vi.fn(), onUrl, onCodePrompt: async () => '4/0AcvDMrCode' })).resolves.toEqual({ ok: true });
+    expect(onUrl).toHaveBeenCalledWith('https://accounts.google.com/o/oauth2/auth');
+    expect((await h.controller.snapshot()).observed.harnessProbe?.antigravity?.signedIn).toBe(true);
   });
 
   it('a Codex login that fails, or "succeeds" without leaving a login, says so and includes the exact command', async () => {

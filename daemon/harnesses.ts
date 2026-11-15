@@ -60,10 +60,15 @@ const readable = (p: string): boolean => {
  */
 export function describeHarnessCredential(harness: Exclude<RealHarness, 'claude'>, env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
   if (harness === 'antigravity') {
-    // OAuth credentials live under ~/.gemini/antigravity-cli. A headless host cannot run the browser sign-in, so the
-    // API-key route (`authenticate` with `gemini-api-key`) is Phase 3 and not wired yet; this only reports what exists.
-    const agyHome = join(env.HOME || home, '.gemini', 'antigravity-cli');
-    return readable(agyHome) ? `existing Antigravity login (${agyHome})` : 'none found: run `agy` once as the daemon user to sign in (the daemon cannot complete a browser sign-in itself)';
+    if (env.GEMINI_API_KEY) return 'GEMINI_API_KEY (environment)';
+    if (env.GOOGLE_GENERATIVE_AI_API_KEY) return 'GOOGLE_GENERATIVE_AI_API_KEY (environment)';
+    // OAuth tokens live in ~/.gemini/jetski-standalone-oauth-token (or oauth_creds.json); ~/.gemini/antigravity-cli is
+    // created even before sign-in completes, so check the credential files themselves.
+    const geminiHome = join(env.HOME || home, '.gemini');
+    const hasOAuth = readable(join(geminiHome, 'jetski-standalone-oauth-token')) || readable(join(geminiHome, 'oauth_creds.json'));
+    return hasOAuth
+      ? `existing Antigravity login (${geminiHome})`
+      : 'none found: run `agy acp --login` once as the daemon user, or set GEMINI_API_KEY';
   }
   if (harness === 'codex') {
     if (env.CODEX_API_KEY) return 'CODEX_API_KEY (environment)';

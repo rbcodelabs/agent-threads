@@ -31,10 +31,10 @@ export interface HarnessRow {
   /** Plain-language CLI / sign-in state. */
   status: string;
   tone: LocalDaemonTone;
-  /** The exact terminal line to run for a login that cannot be done from Settings. */
+  /** The exact terminal line to run for a login inside the container. */
   command?: string;
-  /** A Sign in button is offered (Codex device login from Settings). */
-  signIn?: 'codex';
+  /** A Sign in button is offered (Codex device login or Antigravity browser code paste from Settings). */
+  signIn?: 'codex' | 'antigravity';
 }
 
 export interface LocalDaemonView {
@@ -95,6 +95,7 @@ export function buildHarnessRows(snap: LocalDaemonSnapshot): HarnessRow[] {
     if (id === 'claude') return { ...base, status: 'CLI installed, needs sign-in', tone: 'warn' };
     const command = manualLoginCommand(id, snap.containerName ?? 'agent-threads-local', snap.containerBinary);
     if (id === 'codex') return { ...base, status: 'CLI installed, not signed in', tone: 'warn', signIn: 'codex', command };
+    if (id === 'antigravity') return { ...base, status: 'CLI installed, not signed in', tone: 'warn', signIn: 'antigravity', command };
     return { ...base, status: 'CLI installed, not signed in. OpenCode\'s login is an interactive provider picker, so run this in a terminal:', tone: 'warn', command };
   });
 }
@@ -222,6 +223,7 @@ export function agentClis(harnesses?: readonly string[]): string {
     ...(set.includes('claude') ? ['the Claude CLI from Anthropic'] : []),
     ...(set.includes('codex') ? ['the Codex CLI from npm (@openai/codex)'] : []),
     ...(set.includes('opencode') ? ['the OpenCode CLI from npm (opencode-ai)'] : []),
+    ...(set.includes('antigravity') ? ['the Antigravity CLI from Google (antigravity.google)'] : []),
   ];
   return parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0];
 }

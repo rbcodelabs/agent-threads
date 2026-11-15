@@ -341,10 +341,9 @@ export interface LocalDaemonSettings {
   /**
    * Which agent CLIs the daemon image carries and the daemon accepts sessions for. Absent = Claude only. Changing it
    * changes the container's spec signature, so Update / Apply rebuilds the image layer. Contains no secrets: logins
-   * for Codex and OpenCode live inside the daemon's data volume, never here. Deliberately NOT `AgentHarness`: the
-   * managed container does not carry the Antigravity CLI yet (see LOCAL_HARNESSES), and a test pins that.
+   * for Codex, OpenCode and Antigravity live inside the daemon's data volume, never here.
    */
-  harnesses?: Array<'claude' | 'codex' | 'opencode'>;
+  harnesses?: Array<'claude' | 'codex' | 'opencode' | 'antigravity'>;
   /**
    * Host folders shared READ-WRITE with the daemon, at `/work/<name>` (one path per entry). A thread can then run in a
    * repository outside the vault, which is what the removed sandbox VM's `/work` mount was for. Applied when the

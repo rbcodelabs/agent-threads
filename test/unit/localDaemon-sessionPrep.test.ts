@@ -11,6 +11,7 @@ import { LocalDaemonSessionPrep, forwardableEnv, type SessionPrepDeps } from '..
 import {
   AWS_HOME_DIR,
   CLAUDE_HOME_DIR,
+  GEMINI_HOME_DIR,
   SESSION_ENV_TTL_SEC,
   SKILLS_DIR,
   cliTokenPresentArgs,
@@ -198,13 +199,13 @@ describe('skills', () => {
     expect(a.pluginPaths[0]).not.toBe(b.pluginPaths[0]);
   });
 
-  it('copies ~/.claude/skills and ~/.claude/agents into the daemon user home, once while unchanged', async () => {
-    const f = fixture({ files, plugins: [] });
+  it('copies ~/.claude/skills, ~/.claude/agents and ~/.gemini/skills into the daemon user home, once while unchanged', async () => {
+    const f = fixture({ files: { ...files, '/Users/me/.gemini/skills/agy-skill/SKILL.md': '# agy' }, plugins: [] });
     await f.prep.prepare(undefined);
     const dests = copies(f.calls).map((c) => JSON.parse(c.input!).dest);
-    expect(dests).toEqual([`${CLAUDE_HOME_DIR}/skills`, `${CLAUDE_HOME_DIR}/agents`]);
+    expect(dests).toEqual([`${CLAUDE_HOME_DIR}/skills`, `${CLAUDE_HOME_DIR}/agents`, `${GEMINI_HOME_DIR}/skills`]);
     await f.prep.prepare(undefined);
-    expect(copies(f.calls)).toHaveLength(2);
+    expect(copies(f.calls)).toHaveLength(3);
   });
 });
 

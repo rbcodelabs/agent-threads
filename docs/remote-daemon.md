@@ -71,8 +71,8 @@ there starts it for you. Quitting Geode leaves it running.
 later load. Notes are fully writable: keep vault backups or sync history. Paths containing `:` cannot be mounted and are
 refused. The VM has full outbound network access.
 
-**Harnesses (Claude, Codex, OpenCode).** The block has a toggle per harness; **Claude is on by default**. Each toggle adds
-that CLI to the image layer (npm into `/opt/harnesses`, outside the volumes, like the Claude CLI) and the daemon in the
+**Harnesses (Claude, Codex, OpenCode, Antigravity).** The block has a toggle per harness; **Claude is on by default**. Each toggle adds
+that CLI to the image layer (into `/opt/harnesses`, outside the volumes, like the Claude CLI) and the daemon in the
 container is started with `AGENT_THREADS_HARNESSES` set to the same list, so a session for a harness you left off is refused
 at the door. Changing a toggle only stores the choice: the daemon shows it as pending, and **Apply changes** (or
 Start, when stopped) rebuilds the layer under its own image tag (`agent-threads-daemon-local:<version>-claude-codex`) and
@@ -85,13 +85,19 @@ shows whether the CLI is in the image and whether it is signed in (checked while
   HOME in the data volume (`~/.codex/auth.json` under `/var/lib/agent-threads/home`), so it survives restarts and updates,
   and Geode never sees, stores or logs it. This flow was written against the CLI's documented behaviour and is covered by
   tests with a fake process; if it does not work on your Mac the panel shows the CLI's error and the exact command below.
+- **Antigravity:** **Sign in to Antigravity** runs `/opt/harnesses/bin/agy acp --login` inside the container over plain
+  stdio: it opens the Google OAuth page in your browser, asks you to paste the authorization code (or callback URL) shown
+  after approving, and sends that code to `agy`'s stdin so the CLI writes its OAuth token into the daemon's HOME in the
+  data volume (`~/.gemini/jetski-standalone-oauth-token` under `/var/lib/agent-threads/home`). Geode never stores or logs
+  the code or token. You can also supply `GEMINI_API_KEY` via the project's Extra environment variables / keychain secrets,
+  or run the printed `container exec` line in a terminal.
 - **OpenCode:** `opencode auth login` is an interactive provider picker with no headless mode, so the panel does not run
   it. It shows the exact line instead, with the managed `container` path quoted:
   `'<...>/runtime/<version>/bin/container' exec -it --user 10001 agent-threads-local-<id> /opt/harnesses/bin/opencode auth login`.
   Any failure to sign in also prints the matching command; none fails silently.
 
-Only the Claude token is a secret this plugin holds (the keychain, as before). Codex and OpenCode logins live only in
-the data volume, and the `localDaemon` settings carry just the toggles. **Reset daemon data** removes them with the volume.
+Only the Claude token is a secret this plugin holds (the keychain, as before). Codex, OpenCode and Antigravity logins live
+only in the data volume, and the `localDaemon` settings carry just the toggles. **Reset daemon data** removes them with the volume.
 
 **More folders.** Besides the vault: **Settings, Remote, Local daemon shared folders** lists host folders to share
 READ-WRITE at `/work/<folder name>` (for example a repository outside the vault; they appear under "Run on" as
@@ -110,10 +116,10 @@ contain a value the agent printed.
 Variables that describe this Mac's shell (`PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `LANG`, `LC_*`, `DYLD_*`/`LD_*`, ...) are not
 sent. A spec cannot name any other credential kind as its environment.
 
-**Skills.** The skill plugin directories a host thread would load and `~/.claude/skills` / `~/.claude/agents` are copied
-into the daemon's data volume (`<data>/skills/<name>-<hash>`, `<data>/home/.claude/...`) before a session starts, by a
-small script run inside the container; unchanged directories are not copied again, and the session spec carries the guest
-paths (the daemon keeps only paths under its skills folder). Trees are followed through symlinks, skip `.git` and
+**Skills.** The skill plugin directories a host thread would load and `~/.claude/skills`, `~/.claude/agents` and
+`~/.gemini/skills` are copied into the daemon's data volume (`<data>/skills/<name>-<hash>`, `<data>/home/.claude/...`,
+`<data>/home/.gemini/skills`) before a session starts, by a small script run inside the container; unchanged directories
+are not copied again, and the session spec carries the guest paths (the daemon keeps only paths under its skills folder). Trees are followed through symlinks, skip `.git` and
 `node_modules`, and are capped (2000 files, 20 MiB). The agent can read them.
 
 **AWS (Amazon Bedrock, deploys).** For a Bedrock thread, or when **AWS profiles for the local daemon** is set, a trimmed

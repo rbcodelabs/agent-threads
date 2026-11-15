@@ -60,6 +60,7 @@ import {
   resolveDaemonMemory,
   LABEL_SPEC,
   LABEL_VERSION,
+  HARNESS_LABEL,
   MASKED_VAULT_DIRS,
   SIGN_IN_CONTAINER_BINARY,
   VAULT_GUEST_PATH,
@@ -117,8 +118,14 @@ export interface LocalDaemonDeps {
   externalRoots?(): Promise<ExternalRootInput[] | null | undefined>;
   /** Runs the in-container `claude setup-token` flow. Absent where it cannot run (the sign-in then reports so). */
   signInRunner?(opts: { containerName: string; containerBinaryPath: string } & SignInHandlers): Promise<ContainerSignInResult>;
-  /** Runs `codex login --device-auth` in the container. Absent where it cannot run (the panel then shows the manual command). */
-  harnessSignInRunner?(opts: { harness: 'codex'; containerName: string; onProgress: (text: string) => void; onUrl: (url: string) => void }): Promise<HarnessLoginResult>;
+  /** Runs `codex login --device-auth` or `agy acp --login` in the container. Absent where it cannot run (the panel then shows the manual command). */
+  harnessSignInRunner?(opts: {
+    harness: 'codex' | 'antigravity';
+    containerName: string;
+    onProgress: (text: string) => void;
+    onUrl: (url: string) => void;
+    onCodePrompt?: () => Promise<string | null>;
+  }): Promise<HarnessLoginResult>;
   /**
    * Ends the container's VM helper process (`container-runtime-linux`) on the host: the last resort when a wedged VM
    * ignores `container stop` and `container kill`. Absent where it cannot run.
@@ -872,31 +879,47 @@ export class LocalDaemonController {
   }
 
   /**
-   * Codex sign-in for the daemon: `codex login --device-auth` inside the container (URL + one-time code, nothing to
-   * paste back). The credential is created by the CLI in the daemon's data volume; this plugin never sees or stores it.
+   * Non-Claude harness sign-in inside the daemon container:
+   * - `codex`: `codex login --device-auth` (URL + one-time code, nothing to paste back).
+   * - `antigravity`: `agy acp --login` (Google OAuth URL, then paste authorization code / callback URL on stdin).
+   * Credentials are created by each CLI in the daemon's data volume; this plugin never sees or stores them.
    * OpenCode has no non-interactive login, so it is refused here with the exact command to run (`manualLoginCommand`).
    */
-  signInHarness(harness: Exclude<LocalHarness, 'claude'>, handlers: Pick<SignInHandlers, 'onProgress' | 'onUrl'>, opts: RunOptions = {}): Promise<{ ok: true } | { ok: false; error: string }> {
+  signInHarness(
+    harness: Exclude<LocalHarness, 'claude'>,
+    handlers: Pick<SignInHandlers, 'onProgress' | 'onUrl'> & Partial<Pick<SignInHandlers, 'onCodePrompt'>>,
+    opts: RunOptions = {},
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
     return this.runOp('sign-in', opts, async (ctx) => {
       this.requireEnabled();
       const vaultPath = this.requireVault();
       const manual = async (): Promise<string> => manualLoginCommand(harness, containerNameFor(vaultPath), (await readRuntime(this.deps.runtime)).binary ?? undefined);
       if (!this.harnesses().includes(harness)) return { ok: false as const, error: `${harness} is turned off for the local daemon. Turn it on and apply the change first.` };
-      if (harness !== 'codex' || !this.deps.harnessSignInRunner) {
+      if ((harness !== 'codex' && harness !== 'antigravity') || !this.deps.harnessSignInRunner) {
         return { ok: false as const, error: `${harness} cannot be signed in from Settings. Run this in a terminal:\n${await manual()}` };
       }
-      ctx.emit({ label: 'Signing in to Codex' });
+      if (harness === 'antigravity' && !handlers.onCodePrompt) {
+        return { ok: false as const, error: `Antigravity sign-in needs an authorization code prompt. Run this in a terminal:\n${await manual()}` };
+      }
+      const label = HARNESS_LABEL[harness];
+      ctx.emit({ label: `Signing in to ${label}` });
       await this.reconcile(ctx);
       const d: StepDeps = { runner: this.deps.createRunner(), signal: ctx.signal };
       const before = await probeHarnesses(d, vaultPath);
-      if (before && before.codex?.cli === false) {
-        return { ok: false as const, error: 'The Codex CLI is not in the daemon image. Apply the harness change (Update) so the image is rebuilt with it.' };
+      if (before && before[harness]?.cli === false) {
+        return { ok: false as const, error: `The ${label} CLI is not in the daemon image. Apply the harness change (Update) so the image is rebuilt with it.` };
       }
-      const result = await this.deps.harnessSignInRunner({ harness: 'codex', containerName: containerNameFor(vaultPath), ...handlers });
+      const result = await this.deps.harnessSignInRunner({
+        harness,
+        containerName: containerNameFor(vaultPath),
+        onProgress: handlers.onProgress,
+        onUrl: handlers.onUrl,
+        ...(handlers.onCodePrompt ? { onCodePrompt: handlers.onCodePrompt } : {}),
+      });
       if (!result.ok) return { ok: false as const, error: `${result.error}\nOr run this in a terminal:\n${await manual()}` };
       const after = await probeHarnesses(d, vaultPath);
-      if (after && after.codex?.signedIn === false) {
-        return { ok: false as const, error: `Codex reported success but no login was found in the daemon. Run this in a terminal:\n${await manual()}` };
+      if (after && after[harness]?.signedIn === false) {
+        return { ok: false as const, error: `${label} reported success but no login was found in the daemon. Run this in a terminal:\n${await manual()}` };
       }
       return { ok: true as const };
     });

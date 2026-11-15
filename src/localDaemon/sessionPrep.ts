@@ -33,6 +33,7 @@ import { CredsPusher } from './credsPusher';
 import {
   AWS_HOME_DIR,
   CLAUDE_HOME_DIR,
+  GEMINI_HOME_DIR,
   SESSION_ENV_TTL_SEC,
   SKILLS_DIR,
 } from './spec';
@@ -167,20 +168,22 @@ export class LocalDaemonSessionPrep {
       }
       pluginPaths.push(dest);
     }
-    await this.syncUserDir('skills', `${this.deps.homeDir().replace(/\/+$/, '')}/.claude/skills`, name, run);
-    await this.syncUserDir('agents', `${this.deps.homeDir().replace(/\/+$/, '')}/.claude/agents`, name, run);
+    const home = this.deps.homeDir().replace(/\/+$/, '');
+    await this.syncUserDir('claude-skills', `${home}/.claude/skills`, `${CLAUDE_HOME_DIR}/skills`, name, run);
+    await this.syncUserDir('claude-agents', `${home}/.claude/agents`, `${CLAUDE_HOME_DIR}/agents`, name, run);
+    await this.syncUserDir('gemini-skills', `${home}/.gemini/skills`, `${GEMINI_HOME_DIR}/skills`, name, run);
     return pluginPaths;
   }
 
-  /** `~/.claude/skills` and `~/.claude/agents` are read by the CLI from $HOME, so they go to the daemon user's home. */
-  private async syncUserDir(kind: 'skills' | 'agents', hostDir: string, name: string, run: VmCommandRunner): Promise<void> {
+  /** `~/.claude/skills|agents` and `~/.gemini/skills` are read by each CLI from $HOME, so they go to the daemon user's home. */
+  private async syncUserDir(key: string, hostDir: string, guestDir: string, name: string, run: VmCommandRunner): Promise<void> {
     let real: string;
     try { real = this.deps.fs.realpath(hostDir); } catch { return; }
     const tree = scanTree(this.deps.fs, real);
     if (tree.entries.length === 0) return;
-    if (this.userSkills.get(kind) === tree.fingerprint) return;
-    await copyFilesToContainer(run, name, `${CLAUDE_HOME_DIR}/${kind}`, loadTree(this.deps.fs, tree), { clean: true });
-    this.userSkills.set(kind, tree.fingerprint);
+    if (this.userSkills.get(key) === tree.fingerprint) return;
+    await copyFilesToContainer(run, name, guestDir, loadTree(this.deps.fs, tree), { clean: true });
+    this.userSkills.set(key, tree.fingerprint);
   }
 
   // ── AWS ──────────────────────────────────────────────────────────────────

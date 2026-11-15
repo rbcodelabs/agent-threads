@@ -106,17 +106,47 @@ describe('credential discovery for the startup log', () => {
     mkdirSync(join(home, '.local/share/opencode'), { recursive: true });
     writeFileSync(join(home, '.local/share/opencode/auth.json'), '{}');
     expect(describeHarnessCredential('opencode', {}, home)).toMatch(/existing OpenCode login/);
-    for (const text of [describeHarnessCredential('codex', { CODEX_API_KEY: 'sk-secret' }, home), describeHarnessCredential('opencode', { OPENROUTER_API_KEY: 'sk-secret' }, home)]) {
+
+    // Antigravity: ~/.gemini/antigravity-cli is created even before sign-in completes, so it must NOT count as signed in.
+    mkdirSync(join(home, '.gemini/antigravity-cli'), { recursive: true });
+    expect(describeHarnessCredential('antigravity', {}, home)).toMatch(/none found.*agy acp --login/);
+    expect(describeHarnessCredential('antigravity', { GEMINI_API_KEY: 'AIza-secret' }, home)).toBe('GEMINI_API_KEY (environment)');
+    expect(describeHarnessCredential('antigravity', { GOOGLE_GENERATIVE_AI_API_KEY: 'AIza-secret2' }, home)).toBe('GOOGLE_GENERATIVE_AI_API_KEY (environment)');
+    writeFileSync(join(home, '.gemini/jetski-standalone-oauth-token'), 'oauth-token');
+    expect(describeHarnessCredential('antigravity', {}, home)).toMatch(/existing Antigravity login/);
+
+    for (const text of [
+      describeHarnessCredential('codex', { CODEX_API_KEY: 'sk-secret' }, home),
+      describeHarnessCredential('opencode', { OPENROUTER_API_KEY: 'sk-secret' }, home),
+      describeHarnessCredential('antigravity', { GEMINI_API_KEY: 'sk-secret' }, home),
+    ]) {
       expect(text).not.toContain('sk-secret');
     }
   });
 
   it('a client may not set the credential or config-location variables of the new harnesses', () => {
-    const raw = ['CODEX_HOME=/evil', 'OPENAI_API_KEY=x', 'OPENCODE_CONFIG=/evil', 'XDG_CONFIG_HOME=/evil', 'MYVAR=1'].join('\n');
+    const raw = [
+      'CODEX_HOME=/evil',
+      'OPENAI_API_KEY=x',
+      'OPENCODE_CONFIG=/evil',
+      'XDG_CONFIG_HOME=/evil',
+      'GEMINI_API_KEY=evil',
+      'GOOGLE_GENERATIVE_AI_API_KEY=evil',
+      'GOOGLE_GEMINI_BASE_URL=https://evil.example',
+      'MYVAR=1',
+    ].join('\n');
     // Even when the operator lists them, they stay unsettable.
-    const out = filterClientEnv(raw, ['CODEX_HOME', 'OPENAI_API_KEY', 'OPENCODE_CONFIG', 'XDG_CONFIG_HOME', 'MYVAR']);
+    const out = filterClientEnv(raw, ['CODEX_HOME', 'OPENAI_API_KEY', 'OPENCODE_CONFIG', 'XDG_CONFIG_HOME', 'GEMINI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'GOOGLE_GEMINI_BASE_URL', 'MYVAR']);
     expect(out.text).toBe('MYVAR=1');
-    expect(out.dropped).toEqual(['CODEX_HOME', 'OPENAI_API_KEY', 'OPENCODE_CONFIG', 'XDG_CONFIG_HOME']);
+    expect(out.dropped).toEqual([
+      'CODEX_HOME',
+      'OPENAI_API_KEY',
+      'OPENCODE_CONFIG',
+      'XDG_CONFIG_HOME',
+      'GEMINI_API_KEY',
+      'GOOGLE_GENERATIVE_AI_API_KEY',
+      'GOOGLE_GEMINI_BASE_URL',
+    ]);
   });
 });
 

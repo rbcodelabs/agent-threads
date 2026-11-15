@@ -91,10 +91,13 @@ describe('remote wiring', () => {
   });
 });
 
-describe('the managed local container does not offer Antigravity yet', () => {
-  it('is not a local harness, and a probe line for it is ignored rather than misread', () => {
-    expect(LOCAL_HARNESSES).not.toContain('antigravity');
-    expect(parseHarnessProbe('antigravity.cli=1\nclaude.cli=1\n')).toEqual({ claude: { cli: true, signedIn: false } });
+describe('the managed local container offers Antigravity', () => {
+  it('is a local harness and parseHarnessProbe parses its CLI and auth lines', () => {
+    expect(LOCAL_HARNESSES).toContain('antigravity');
+    expect(parseHarnessProbe('antigravity.cli=1\nantigravity.auth=1\nclaude.cli=1\n')).toEqual({
+      antigravity: { cli: true, signedIn: true },
+      claude: { cli: true, signedIn: false },
+    });
   });
 });
 
