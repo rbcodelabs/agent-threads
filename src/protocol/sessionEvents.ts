@@ -45,7 +45,7 @@ type WireValue<T> =
 export type WireArgs<A extends readonly unknown[]> = { [I in keyof A]: WireValue<A[I]> };
 
 /** Callbacks that never cross the wire. `onRawEvent` is the daemon's own JSONL log hook. */
-export const NOT_ON_WIRE = ['onRawEvent', 'onStreamReset'] as const satisfies ReadonlyArray<keyof SessionCallbacks>;
+export const NOT_ON_WIRE = ['onRawEvent', 'onStreamReset', 'onThinking'] as const satisfies ReadonlyArray<keyof SessionCallbacks>;
 export type NotOnWireKey = (typeof NOT_ON_WIRE)[number];
 
 /** Wire payloads for callbacks that need explicit overrides (request/resolve pairs). */
@@ -103,6 +103,7 @@ export const CALLBACK_DISPOSITION: Record<keyof SessionCallbacks, CallbackDispos
   onPermissionDenied: 'event',
   onRateLimit: 'event',
   onUsage: 'event',
+  onThinking: 'not_on_wire',
   onToolResultImages: 'event',
   onTaskEvent: 'event',
   onRawEvent: 'not_on_wire',

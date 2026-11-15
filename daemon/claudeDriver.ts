@@ -421,6 +421,7 @@ export class HarnessSessionDriver implements SessionDriver {
       };
     }
     cb.onStreamReset = () => { /* client-local: the daemon never resyncs itself */ };
+    cb.onThinking = () => { this.touch(); };
     cb.onRawEvent = (event: Record<string, unknown>) => {
       this.touch();
       // Every SDK event carries the session id; the first turn of a session

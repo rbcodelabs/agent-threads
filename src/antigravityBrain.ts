@@ -32,6 +32,7 @@ export interface BrainTranscriptStep {
   status?: string;
   created_at?: string;
   model?: string;
+  thinking?: string;
   content?: string;
   tool_calls?: BrainToolCall[];
 }
@@ -47,6 +48,14 @@ export interface AntigravityBrainOptions {
    * cancellation or a future CLI change), this prevents holding the turn open indefinitely.
    */
   wakeupGraceMs?: number;
+  /**
+   * Time (default 2500ms) a post-ACP wakeup tool call may remain pending without `--dangerously-skip-permissions`
+   * before `AntigravitySession` cancels the wedged internal wakeup and promotes it to an active `session/prompt` RPC so
+   * `agy` can forward `session/request_permission`.
+   */
+  wakeupToolStallMs?: number;
+  /** Settle delay (default 150ms) between `session/cancel` and continuation `session/prompt` on stalled wakeup promotion. */
+  wakeupCancelSettleMs?: number;
 }
 
 export interface PendingSubagentSpawnMeta {
@@ -213,6 +222,24 @@ export function parseAntigravityWakeupMessage(content: string | undefined): { se
     senders,
     summary: firstCleanLine(stripped, 240) ?? 'Background update received',
   };
+}
+
+/** Extract a concise single-line preview from streaming `agent_thought_chunk` text or `step.thinking`. */
+export function extractAntigravityThoughtSummary(raw: string | undefined, maxLen = 140): string | undefined {
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  const lines = raw.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const cleaned = lines[i]
+      .replace(/^[\s>*#-]+/, '')
+      .replace(/\*\*|__/g, '')
+      .replace(/`/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (cleaned.length >= 4) {
+      return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen - 1)}…` : cleaned;
+    }
+  }
+  return undefined;
 }
 
 /** Build spawn metadata from an `invoke_subagent` tool call's arguments. */

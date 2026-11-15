@@ -157,6 +157,8 @@ export interface SessionCallbacks {
   onCommandsChanged?: (commands: import('@anthropic-ai/claude-agent-sdk').SlashCommand[]) => void;
   /** Fired when agentProgressSummaries is enabled and a task emits an AI summary. */
   onTaskProgressSummary?: (taskId: string, summary: string) => void;
+  /** Fired with a concise ephemeral reasoning/thought summary while a turn is thinking before tokens arrive. */
+  onThinking?: (text: string) => void;
   /**
    * Fired when a Bash tool result contains a gitOperation classification
    * (commit, push, PR create/merge, etc.). Lets the UI render a structured

@@ -759,4 +759,46 @@ describe('ThreadsView active sub-agent / workflow task pills across parent messa
     expect(messagesEl.querySelector('.ct-streaming')).toBeNull();
     expect(view.streamingBuffers.has('thread-1')).toBe(false);
   });
+
+  it('renders live thinking previews next to the spinner, restores them across thread switches, and clears them on tool_use or token', async () => {
+    const userMsg: ChatMessage = { id: 'u-think', role: 'user', content: 'Audit Compass roadmap', timestamp: 1 };
+    harness = await createHarness([makeThread('thread-1', [userMsg]), makeThread('thread-2')]);
+    const { view, messagesEl, running, emit } = harness;
+
+    running.add('thread-1');
+    emit('thread-1', { type: 'streaming_start' });
+    emit('thread-1', { type: 'thinking', text: 'Checking Compass roadmap items against merged PRs' });
+
+    const preview1 = messagesEl.querySelector('.ct-streaming .ct-thinking-preview');
+    expect(preview1).not.toBeNull();
+    expect(preview1?.textContent).toBe('Checking Compass roadmap items against merged PRs');
+
+    // Switch away to thread-2 and back to thread-1: thinking preview must restore from streamingBuffers.
+    await view.setActiveThread('thread-2');
+    await flush();
+    expect(messagesEl.querySelector('.ct-thinking-preview')).toBeNull();
+
+    await view.setActiveThread('thread-1');
+    await flush();
+    expect(messagesEl.querySelector('.ct-streaming .ct-thinking-preview')?.textContent).toBe(
+      'Checking Compass roadmap items against merged PRs',
+    );
+
+    // Starting a tool call clears stale thinking text; a subsequent thinking phase re-renders fresh text.
+    emit('thread-1', {
+      type: 'tool_use',
+      record: { toolUseId: 'tu-1', name: 'Read', summary: 'src/index.ts', status: 'pending', timestamp: 1 },
+    });
+    expect(messagesEl.querySelector('.ct-streaming .ct-thinking-preview')).toBeNull();
+
+    emit('thread-1', { type: 'thinking', text: 'Updating 12 shipped tasks in parallel' });
+    expect(messagesEl.querySelector('.ct-streaming .ct-thinking-preview')?.textContent).toBe(
+      'Updating 12 shipped tasks in parallel',
+    );
+
+    // Real streamed prose tokens replace the ephemeral thinking preview cleanly.
+    emit('thread-1', { type: 'token', text: 'Updated all 12 tasks.' });
+    await new Promise((r) => setTimeout(r, 120));
+    expect(messagesEl.querySelector('.ct-streaming .ct-thinking-preview')).toBeNull();
+  });
 });
