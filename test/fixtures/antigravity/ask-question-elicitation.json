@@ -1,0 +1,118 @@
+{
+  "recordedFrom": "agy acp 1.5.9 (Antigravity CLI 1.1.13)",
+  "toolCall": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "SESSION-ID",
+      "update": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call_ask_question_1",
+        "title": "Ask the user 2 questions",
+        "kind": "other",
+        "status": "in_progress",
+        "name": "ask_question",
+        "rawInput": {
+          "questions": [
+            {
+              "question": "Which events should pop a live alert?",
+              "options": [
+                "(Recommended) Direct personal triggers only (Task ASSIGNED + @MENTIONED)",
+                "All unread notifications (assignments, mentions, comments, and status changes)"
+              ]
+            },
+            {
+              "question": "Pick toppings?",
+              "is_multi_select": true,
+              "options": [
+                "Cheese, aged cheddar",
+                "Peppers, roasted"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "toolPending": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "SESSION-ID",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "call_ask_question_1",
+        "status": "pending"
+      }
+    }
+  },
+  "elicitationRequest": {
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "elicitation/create",
+    "params": {
+      "sessionId": "SESSION-ID",
+      "toolCallId": "call_ask_question_1",
+      "mode": "form",
+      "message": "The agent has 2 questions.",
+      "requestedSchema": {
+        "type": "object",
+        "properties": {
+          "q1": {
+            "type": "string",
+            "title": "Which events should pop a live alert?",
+            "oneOf": [
+              {
+                "const": "1",
+                "title": "(Recommended) Direct personal triggers only (Task ASSIGNED + @MENTIONED)"
+              },
+              {
+                "const": "2",
+                "title": "All unread notifications (assignments, mentions, comments, and status changes)"
+              }
+            ]
+          },
+          "q1_other": {
+            "type": "string",
+            "title": "Other",
+            "description": "Optional free-form answer to: Which events should pop a live alert?"
+          },
+          "q2": {
+            "type": "array",
+            "title": "Pick toppings?",
+            "items": {
+              "anyOf": [
+                {
+                  "const": "1",
+                  "title": "Cheese, aged cheddar"
+                },
+                {
+                  "const": "2",
+                  "title": "Peppers, roasted"
+                }
+              ]
+            }
+          },
+          "q2_other": {
+            "type": "string",
+            "title": "Other",
+            "description": "Optional free-form answer to: Pick toppings?"
+          }
+        }
+      }
+    }
+  },
+  "toolCompleted": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "SESSION-ID",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "call_ask_question_1",
+        "status": "completed",
+        "rawOutput": "User responded to your questions:\n\nQ1: Which events should pop a live alert?\nA1: All unread notifications (assignments, mentions, comments, and status changes)\n\nQ2: Pick toppings?\nA2: Cheese, aged cheddar, Peppers, roasted"
+      }
+    }
+  }
+}

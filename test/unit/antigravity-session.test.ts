@@ -16,9 +16,12 @@ import {
   antigravityToolName,
   antigravityToolSummary,
   antigravityTurnTokens,
+  buildAntigravityElicitationReply,
+  parseAntigravityElicitation,
   resolveAntigravityPermission,
   type AntigravityBrainOptions,
 } from '../../src/AntigravitySession';
+import type { AskQuestion } from '../../src/types';
 import {
   cleanBrainArgString,
   cleanBrainArgStringArray,
@@ -244,6 +247,7 @@ type Harness = ReturnType<typeof makeHarness>;
 function makeHarness(over: Partial<HarnessSessionOptions> & {
   env?: Record<string, string>;
   permission?: (tool: string, detail: string) => Promise<boolean>;
+  askQuestion?: (questions: AskQuestion[]) => Promise<Record<string, string>>;
   startTimeoutMs?: number;
   binary?: string;
   launcher?: AcpLauncher;
@@ -263,6 +267,8 @@ function makeHarness(over: Partial<HarnessSessionOptions> & {
   const toolResults: Array<[string, string]> = [];
   const filesEdited: string[][] = [];
   const permissionRequests: Array<{ tool: string; detail: string }> = [];
+  const questionRequests: AskQuestion[][] = [];
+  let questionsCanceled = 0;
   const tasksStarted: Array<{ taskId: string; description: string; isWorkflow?: boolean; taskType?: string; subagentType?: string; parentNativeAgentId?: string; model?: string }> = [];
   const tasksProgress: Array<{ taskId: string; description?: string; lastToolName?: string }> = [];
   const tasksUpdated: Array<{ taskId: string; patch: any }> = [];
@@ -279,7 +285,11 @@ function makeHarness(over: Partial<HarnessSessionOptions> & {
     onInterrupted: () => { events.push('interrupted'); },
     onError: (e: Error) => { events.push('error'); errors.push(e); },
     onPermissionRequest: async (tool: string, detail: string) => { permissionRequests.push({ tool, detail }); return over.permission ? over.permission(tool, detail) : true; },
-    onAskUserQuestion: async () => ({}),
+    onAskUserQuestion: async (questions: AskQuestion[]) => {
+      questionRequests.push(questions);
+      return over.askQuestion ? over.askQuestion(questions) : {};
+    },
+    onAskUserQuestionCanceled: () => { questionsCanceled++; },
     onOpenNewTab: async () => ({ threadId: 'x', title: 'x' }),
     onToolResult: (id: string, status: string) => { toolResults.push([id, status]); },
     onFilesEdited: (paths: string[]) => { filesEdited.push(paths); },
@@ -312,6 +322,7 @@ function makeHarness(over: Partial<HarnessSessionOptions> & {
   };
   delete (options as any).env;
   delete (options as any).permission;
+  delete (options as any).askQuestion;
   delete (options as any).startTimeoutMs;
   delete (options as any).binary;
   delete (options as any).launcher;
@@ -336,12 +347,15 @@ function makeHarness(over: Partial<HarnessSessionOptions> & {
   };
   return {
     session, options, callbacks, brainDir, spawnedArgs, events, tokens, thoughts, messages, messageTools,
-    toolUses, toolResults, filesEdited, permissionRequests, tasksStarted, tasksProgress, tasksUpdated, tasksNotified,
+    toolUses, toolResults, filesEdited, permissionRequests, questionRequests,
+    getQuestionsCanceled: () => questionsCanceled,
+    tasksStarted, tasksProgress, tasksUpdated, tasksNotified,
     done, errors, received, turn, appendBrain,
   };
 }
 
 const permissionReplies = (h: Harness) => h.received().filter((m: any) => m.method === undefined && m.result?.outcome).map((m: any) => m.result.outcome);
+const elicitationReplies = (h: Harness) => h.received().filter((m: any) => m.method === undefined && typeof m.result?.action === 'string').map((m: any) => m.result);
 
 describe('AntigravitySession turns', () => {
   it('streams a text turn, finishes the message, and reports usage and the model catalog', async () => {
@@ -361,11 +375,18 @@ describe('AntigravitySession turns', () => {
     expect(prompt.params.prompt[0]).toEqual({ type: 'text', text: 'TEXT hello' });
   });
 
-  it('sends the handshake agy needs: protocol 1, no client fs or terminal', async () => {
+  it('sends the handshake agy needs: protocol 1, no client fs or terminal, and form elicitation enabled', async () => {
     const h = makeHarness();
     await h.session.start(h.options);
     const init = h.received().find((m: any) => m.method === 'initialize');
-    expect(init.params).toEqual({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } });
+    expect(init.params).toEqual({
+      protocolVersion: 1,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        terminal: false,
+        elicitation: { form: {} },
+      },
+    });
     const created = h.received().find((m: any) => m.method === 'session/new');
     expect(created.params).toEqual({ cwd: process.cwd(), mcpServers: [] });
   });
@@ -1347,5 +1368,250 @@ describe('AntigravitySession permission respawn, wakeup stall recovery, and live
 
     await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(2), { timeout: 10_000 });
     expect(h.thoughts).toContain('Synthesizing findings across the 10 inspected files before summarizing.');
+  });
+});
+
+// ── ACP form elicitation (`ask_question` -> `AskUserQuestion`) ───────────────
+
+describe('parseAntigravityElicitation and buildAntigravityElicitationReply', () => {
+  const recordedParams = fixture('ask-question-elicitation.json').elicitationRequest.params;
+
+  it('parses the recorded agy acp ask_question schema into single-select and multi-select AskQuestions', () => {
+    const fields = parseAntigravityElicitation(recordedParams);
+    expect(fields).toHaveLength(2);
+    expect(fields!.map((f) => f.askQuestion)).toEqual([
+      {
+        id: 'q1',
+        question: 'Which events should pop a live alert?',
+        header: '',
+        options: [
+          { label: '(Recommended) Direct personal triggers only (Task ASSIGNED + @MENTIONED)', description: '' },
+          { label: 'All unread notifications (assignments, mentions, comments, and status changes)', description: '' },
+        ],
+        multiSelect: false,
+        allowOther: true,
+        source: 'antigravity',
+        requestItemId: 'call_ask_question_1',
+      },
+      {
+        id: 'q2',
+        question: 'Pick toppings?',
+        header: '',
+        options: [
+          { label: 'Cheese, aged cheddar', description: '' },
+          { label: 'Peppers, roasted', description: '' },
+        ],
+        multiSelect: true,
+        allowOther: true,
+        source: 'antigravity',
+        requestItemId: 'call_ask_question_1',
+      },
+    ]);
+  });
+
+  it('preserves option labels containing commas across single-select, multi-select, and write-in Other answers', () => {
+    const fields = parseAntigravityElicitation(recordedParams)!;
+
+    // Comma-bearing option labels selected on both single-select and multi-select + trailing comma-bearing write-in.
+    expect(buildAntigravityElicitationReply(fields, {
+      q1: 'All unread notifications (assignments, mentions, comments, and status changes)',
+      q2: 'Cheese, aged cheddar,Peppers, roasted,Olives, kalamata, and basil',
+    })).toEqual({
+      action: 'accept',
+      content: {
+        q1: '2',
+        q2: ['1', '2'],
+        q2_other: 'Olives, kalamata, and basil',
+      },
+    });
+
+    // Write-in only on single-select (including commas) and skipped multi-select question.
+    expect(buildAntigravityElicitationReply(fields, {
+      q1: 'Custom rule: mentions, reviews, and P0 alerts',
+      q2: '',
+    })).toEqual({
+      action: 'accept',
+      content: {
+        q1_other: 'Custom rule: mentions, reviews, and P0 alerts',
+      },
+    });
+
+    // Write-in only on multi-select omits `q2` and sets `q2_other`.
+    expect(buildAntigravityElicitationReply(fields, {
+      q1: '',
+      q2: 'Mushrooms, sliced',
+    })).toEqual({
+      action: 'accept',
+      content: {
+        q2_other: 'Mushrooms, sliced',
+      },
+    });
+  });
+
+  it('prefers exact comma-bearing option matches over splitting into prefix + Other', () => {
+    const fields = parseAntigravityElicitation({
+      mode: 'form',
+      requestedSchema: {
+        type: 'object',
+        properties: {
+          q1: {
+            type: 'array',
+            title: 'Choose?',
+            items: {
+              anyOf: [
+                { const: '1', title: 'Alpha' },
+                { const: '2', title: 'Alpha,Beta' },
+              ],
+            },
+          },
+          q1_other: { type: 'string', title: 'Other' },
+        },
+      },
+    })!;
+
+    // Selecting only Option 2 ("Alpha,Beta") must NOT be misparsed as Option 1 ("Alpha") + Other ("Beta").
+    expect(buildAntigravityElicitationReply(fields, { q1: 'Alpha,Beta' })).toEqual({
+      action: 'accept',
+      content: { q1: ['2'] },
+    });
+  });
+
+  it('supports composer shortcut answers keyed by question text and plain string fields without _other', () => {
+    const recordedFields = parseAntigravityElicitation(recordedParams)!;
+    expect(buildAntigravityElicitationReply(recordedFields, {
+      'Which events should pop a live alert?': 'Only @mentions',
+      'Pick toppings?': 'Cheese, aged cheddar',
+    })).toEqual({
+      action: 'accept',
+      content: {
+        q1_other: 'Only @mentions',
+        q2: ['1'],
+      },
+    });
+
+    const plainTextFields = parseAntigravityElicitation({
+      mode: 'form',
+      requestedSchema: {
+        type: 'object',
+        properties: {
+          branchName: { type: 'string', title: 'Target branch?' },
+          strictChoice: { type: 'string', title: 'Env?', oneOf: [{ const: 'prod', title: 'Production' }] },
+        },
+      },
+    })!;
+    expect(plainTextFields.map((f) => ({ id: f.id, allowOther: f.allowOther, optionsCount: f.askQuestion.options.length }))).toEqual([
+      { id: 'branchName', allowOther: true, optionsCount: 0 },
+      { id: 'strictChoice', allowOther: false, optionsCount: 1 },
+    ]);
+    expect(buildAntigravityElicitationReply(plainTextFields, { branchName: 'main', strictChoice: 'Production' })).toEqual({
+      action: 'accept',
+      content: { branchName: 'main', strictChoice: 'prod' },
+    });
+  });
+
+  it('rejects non-form or non-question schemas with null and maps empty aborted answer maps to cancel', () => {
+    expect(parseAntigravityElicitation({ mode: 'url', requestedSchema: { properties: { q1: { type: 'string' } } } })).toBeNull();
+    expect(parseAntigravityElicitation({ mode: 'form', requestedSchema: { properties: {} } })).toBeNull();
+    expect(parseAntigravityElicitation({ mode: 'form', requestedSchema: { properties: { count: { type: 'integer' } } } })).toBeNull();
+
+    const fields = parseAntigravityElicitation(recordedParams)!;
+    expect(buildAntigravityElicitationReply(fields, {})).toEqual({ action: 'cancel' });
+  });
+});
+
+describe('AntigravitySession elicitation/create integration', () => {
+  it('routes ask_question elicitation/create through onAskUserQuestion and returns structured answers', async () => {
+    const h = makeHarness({
+      askQuestion: async (questions) => ({
+        [questions[0].id!]: 'All unread notifications (assignments, mentions, comments, and status changes)',
+        [questions[1].id!]: 'Cheese, aged cheddar,Extra garlic',
+      }),
+    });
+    await h.session.start(h.options);
+    await h.turn('ASK_QUESTION');
+
+    expect(h.questionRequests).toHaveLength(1);
+    expect(h.questionRequests[0]).toHaveLength(2);
+    expect(h.questionRequests[0][0]).toMatchObject({
+      id: 'q1',
+      source: 'antigravity',
+      multiSelect: false,
+      allowOther: true,
+    });
+    expect(h.questionRequests[0][1]).toMatchObject({
+      id: 'q2',
+      source: 'antigravity',
+      multiSelect: true,
+      allowOther: true,
+    });
+    expect(elicitationReplies(h)).toEqual([
+      {
+        action: 'accept',
+        content: {
+          q1: '2',
+          q2: ['1'],
+          q2_other: 'Extra garlic',
+        },
+      },
+    ]);
+    expect(h.toolUses).toContainEqual(expect.objectContaining({
+      name: 'AskUserQuestion',
+      summary: 'Which events should pop a live alert?',
+    }));
+    expect(h.messages.join('\n')).toContain('"action":"accept"');
+    const rawTypes = (h.callbacks.onRawEvent as any).mock.calls.map((c: any[]) => c[0].type);
+    expect(rawTypes).toContain('antigravity/elicitation_create');
+  });
+
+  it('auto-cancels elicitation/create in dontAsk mode without prompting the user', async () => {
+    const h = makeHarness({
+      permissionMode: 'dontAsk',
+      askQuestion: async () => { throw new Error('should not prompt in dontAsk'); },
+    });
+    await h.session.start(h.options);
+    await h.turn('ASK_QUESTION');
+
+    expect(h.questionRequests).toHaveLength(0);
+    expect(elicitationReplies(h)).toEqual([{ action: 'cancel' }]);
+  });
+
+  it('declines non-form elicitation requests cleanly without stalling', async () => {
+    const h = makeHarness();
+    await h.session.start(h.options);
+    await expect(h.session.handleElicitationCreate({ mode: 'url', message: 'Sign in' })).resolves.toEqual({ action: 'decline' });
+    expect(h.questionRequests).toHaveLength(0);
+  });
+
+  it('cancels a pending elicitation on interrupt(), notifies onAskUserQuestionCanceled, and settles as interrupted', async () => {
+    let releaseQuestion: (answers: Record<string, string>) => void = () => undefined;
+    const h = makeHarness({
+      askQuestion: () => new Promise<Record<string, string>>((resolve) => { releaseQuestion = resolve; }),
+    });
+    await h.session.start(h.options);
+    h.session.send('ASK_QUESTION');
+
+    await vi.waitFor(() => expect(h.session.hasPendingElicitation).toBe(true), { timeout: 10_000 });
+    expect(h.session.canIdleReap()).toBe(false);
+
+    await h.session.interrupt();
+    await vi.waitFor(() => expect(h.events).toContain('interrupted'), { timeout: 10_000 });
+    expect(elicitationReplies(h)).toEqual([{ action: 'cancel' }]);
+    expect(h.getQuestionsCanceled()).toBe(1);
+    expect(h.session.hasPendingElicitation).toBe(false);
+    releaseQuestion({ q1: 'late' });
+    expect(h.errors).toEqual([]);
+  });
+
+  it('fires onAskUserQuestionCanceled and clears pending elicitation state if agy crashes mid-question', async () => {
+    const h = makeHarness({
+      askQuestion: () => new Promise<Record<string, string>>(() => undefined),
+    });
+    await h.session.start(h.options);
+    h.session.send('ASK_QUESTION CRASH_DURING_ELICITATION');
+
+    await vi.waitFor(() => expect(h.errors).toHaveLength(1), { timeout: 10_000 });
+    expect(h.getQuestionsCanceled()).toBe(1);
+    expect(h.session.hasPendingElicitation).toBe(false);
+    expect(h.session.canIdleReap()).toBe(true);
   });
 });
