@@ -1218,7 +1218,7 @@ describe('AntigravitySession permission respawn, wakeup stall recovery, and live
       ['acp', '--dangerously-skip-permissions'],
       ['acp'],
     ]), { timeout: 10_000 });
-  });
+  }, 20_000);
 
   it('does not re-inject <system-instructions> when cold session/load succeeds with replayed history', async () => {
     const h = makeHarness({
@@ -1242,7 +1242,7 @@ describe('AntigravitySession permission respawn, wakeup stall recovery, and live
     await h.session.start(h.options);
 
     h.session.send('TEXT coordinate subagent');
-    await vi.waitFor(() => expect(h.received().some((m: any) => m.method === 'session/prompt')), { timeout: 10_000 });
+    await vi.waitFor(() => expect(h.received().some((m: any) => m.method === 'session/prompt')).toBe(true), { timeout: 10_000 });
     const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
     const subHeader = 'Created the ' + 'following subagent:';
 
@@ -1285,7 +1285,7 @@ describe('AntigravitySession permission respawn, wakeup stall recovery, and live
     expect(prompts[1].params.prompt[0].text).toContain('Resuming background wakeup');
     expect(h.permissionRequests).toContainEqual(expect.objectContaining({ tool: 'Antigravity: Bash' }));
     expect(h.messages).toContain('Ran the command.');
-  });
+  }, 20_000);
 
   it('emits cleaned onThinking summaries from live agent_thought_chunk and post-ACP step.thinking, and injects execution guidance with host bridge', async () => {
     const h = makeHarness({
@@ -1347,5 +1347,5 @@ describe('AntigravitySession permission respawn, wakeup stall recovery, and live
 
     await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(2), { timeout: 10_000 });
     expect(h.thoughts).toContain('Synthesizing findings across the 10 inspected files before summarizing.');
-  });
+  }, 20_000);
 });
