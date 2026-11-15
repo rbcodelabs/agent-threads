@@ -1241,34 +1241,19 @@ describe('AntigravitySession permission respawn, wakeup stall recovery, and live
     });
     await h.session.start(h.options);
 
-    h.session.send('TEXT coordinate subagent');
-    await vi.waitFor(() => expect(h.received().some((m: any) => m.method === 'session/prompt')).toBe(true), { timeout: 10_000 });
+    h.session.send('SUBAGENT_BRAIN coordinate subagent');
+    await vi.waitFor(() => expect(h.tasksStarted).toContainEqual(expect.objectContaining({ taskId: 'child-sub-1' })), { timeout: 10_000 });
     const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
-    const subHeader = 'Created the ' + 'following subagent:';
-
-    h.appendBrain(sessionId, [
-      {
-        step_index: 0,
-        source: 'MODEL',
-        type: 'PLANNER_RESPONSE',
-        status: 'DONE',
-        content: '',
-        tool_calls: [{ id: 's1', name: 'invoke_subagent', args: { Role: 'Tester', TypeName: 'research' } }],
-      },
-      { step_index: 1, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: `${subHeader}\n{\n  "conversationId": "tester-sub-1"\n}` },
-    ]);
-
-    await vi.waitFor(() => expect(h.tasksStarted).toContainEqual(expect.objectContaining({ taskId: 'tester-sub-1' })), { timeout: 10_000 });
     expect(h.done).not.toHaveBeenCalled();
 
     // Subagent finishes; parent wakes up via <SYSTEM_MESSAGE> and attempts run_command without --dangerously-skip-permissions, stalling with no GENERIC result.
-    h.appendBrain('tester-sub-1', [
+    h.appendBrain('child-sub-1', [
       { step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Ready to verify.' },
     ]);
     h.appendBrain(sessionId, [
-      { step_index: 2, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=tester-sub-1\nReady to verify.' },
+      { step_index: 4, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=child-sub-1\nReady to verify.' },
       {
-        step_index: 3,
+        step_index: 5,
         source: 'MODEL',
         type: 'PLANNER_RESPONSE',
         status: 'DONE',
