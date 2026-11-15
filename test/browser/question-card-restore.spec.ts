@@ -8,9 +8,14 @@
  * test/screenshots/question-card-restore.spec.ts.
  */
 import { test, expect } from '@playwright/test';
+import fs from 'fs';
 import path from 'path';
+import { buildAntigravityElicitationReply, parseAntigravityElicitation } from '../../src/AntigravitySession';
 
 const harnessUrl = 'file://' + path.resolve('test/harness/index.html');
+const agyFixture = JSON.parse(
+  fs.readFileSync(path.resolve('test/fixtures/antigravity/ask-question-elicitation.json'), 'utf8'),
+);
 
 const SAMPLE_QUESTIONS = [
   {
@@ -199,6 +204,43 @@ test.describe('AskUserQuestion — inline card (pendingQuestions)', () => {
     const calls = await page.evaluate(() => (window as any).__sendMessageCalls);
     expect(calls[0].text).not.toContain('s3cret');
     expect(calls[0].text).toContain('request the secret again with request_user_input');
+  });
+
+  test('Antigravity elicitation card renders "Antigravity needs your input" and round-trips comma-bearing options + Other write-in', async ({ page }) => {
+    const fields = parseAntigravityElicitation(agyFixture.elicitationRequest.params)!;
+    const questions = fields.map((f) => f.askQuestion);
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(harnessUrl);
+    await page.waitForSelector('.ct-title-row');
+    await page.waitForTimeout(300);
+
+    const answersPromise = page.evaluate((agyQuestions) => {
+      const view = (window as any).__view;
+      const activeId = view['activeThreadId'];
+      return view['manager'].questionHandler(activeId, agyQuestions) as Promise<Record<string, string>>;
+    }, questions);
+
+    const card = page.locator('.ct-question-card');
+    await card.waitFor();
+    await expect(page.locator('.ct-question-card-label')).toHaveText('Antigravity needs your input');
+
+    // Select comma-bearing single-select option 2, both comma-bearing multi-select options, and Other write-in.
+    await card.locator('.ct-question').nth(0).locator('.ct-question-option').nth(1).click();
+    await card.locator('.ct-question').nth(1).locator('.ct-question-option').nth(0).click();
+    await card.locator('.ct-question').nth(1).locator('.ct-question-option').nth(1).click();
+    await card.locator('.ct-question').nth(1).locator('.ct-question-other-text').fill('Olives, kalamata');
+    await page.locator('.ct-question-card-submit').click();
+
+    const answers = await answersPromise;
+    expect(buildAntigravityElicitationReply(fields, answers)).toEqual({
+      action: 'accept',
+      content: {
+        q1: '2',
+        q2: ['1', '2'],
+        q2_other: 'Olives, kalamata',
+      },
+    });
   });
 
   test('no card rendered when thread has no pendingQuestions', async ({ page }) => {

@@ -237,6 +237,31 @@ test.describe('Mobile View', () => {
     await shot(page.locator('.ct-mobile-question-card'), 'mobile-question-card.png');
   });
 
+  test('Antigravity question card on mobile (390x844 and 375x667 — Antigravity needs your input, 44px tap targets, no overflow)', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(mobileHarnessUrl('mobile-question-antigravity'));
+    const card = page.locator('.ct-mobile-question-card');
+    await card.waitFor();
+    await expect(card.locator('.ct-mobile-question-label')).toHaveText('Antigravity needs your input');
+    await card.locator('.ct-mobile-question').nth(0).locator('.ct-mobile-question-option').nth(1).click();
+    await card.locator('.ct-mobile-question').nth(1).locator('.ct-mobile-question-option').nth(0).click();
+    const submitHeight = await card.locator('.ct-mobile-question-submit').evaluate((el) => el.getBoundingClientRect().height);
+    expect(submitHeight).toBeGreaterThanOrEqual(44);
+    expect(await card.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(false);
+    await page.waitForTimeout(300);
+    await shot(card, 'mobile-question-card-antigravity.png');
+
+    await page.setViewportSize({ width: 375, height: 667 });
+    await page.goto(mobileHarnessUrl('mobile-question-antigravity') + '&width=375&height=667');
+    const seCard = page.locator('.ct-mobile-question-card');
+    await seCard.waitFor();
+    await expect(seCard.locator('.ct-mobile-question-label')).toHaveText('Antigravity needs your input');
+    expect(await seCard.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(false);
+    await seCard.evaluate((el) => el.scrollIntoView({ block: 'start' }));
+    await page.waitForTimeout(300);
+    await shot(page, 'mobile-se-question-card-antigravity.png');
+  });
+
   test('queue rows (stacked above composer, replace flat banner)', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(mobileHarnessUrl('mobile-queue'));
