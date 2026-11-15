@@ -1603,13 +1603,25 @@ describe('AntigravitySession elicitation/create integration', () => {
   });
 
   it('fires onAskUserQuestionCanceled and clears pending elicitation state if agy crashes mid-question', async () => {
+    let killAgent: () => void = () => undefined;
     const h = makeHarness({
+      launcher: (opts) => {
+        const channel = spawnAcpChannel({ ...opts, binaryPath: process.execPath, args: [AGENT] });
+        killAgent = () => channel.kill();
+        return channel;
+      },
       askQuestion: () => new Promise<Record<string, string>>(() => undefined),
     });
     await h.session.start(h.options);
-    h.session.send('ASK_QUESTION CRASH_DURING_ELICITATION');
+    h.session.send('ASK_QUESTION');
 
+    // Wait until `elicitation/create` has definitely reached AntigravitySession before simulating the child crash.
+    await vi.waitFor(() => expect(h.session.hasPendingElicitation).toBe(true), { timeout: 10_000 });
+    expect(h.session.canIdleReap()).toBe(false);
+
+    killAgent();
     await vi.waitFor(() => expect(h.errors).toHaveLength(1), { timeout: 10_000 });
+    expect(h.errors[0].message).toMatch(/exited unexpectedly/);
     expect(h.getQuestionsCanceled()).toBe(1);
     expect(h.session.hasPendingElicitation).toBe(false);
     expect(h.session.canIdleReap()).toBe(true);

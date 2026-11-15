@@ -164,12 +164,6 @@ async function runPrompt(sessionId, text) {
       return stream.find((m) => m.result?.stopReason).result;
     }
     const elicitationParams = withSession(askQuestionFixture.elicitationRequest.params, sessionId);
-    if (text.includes('CRASH_DURING_ELICITATION')) {
-      const id = String(++permissionId);
-      write({ jsonrpc: '2.0', id, method: 'elicitation/create', params: elicitationParams });
-      await sleep(30);
-      process.exit(1);
-    }
     const reply = await Promise.race([
       requestElicitation(elicitationParams),
       new Promise((resolve) => { cancelResolve = () => resolve({ __cancelled: true }); }),

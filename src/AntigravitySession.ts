@@ -1032,6 +1032,7 @@ export class AntigravitySession {
       .catch((error) => {
         if (this.closed || !this._turnInFlight) return;
         this.abortBackgroundWork(options.callbacks, 'Failed');
+        this.cancelPendingElicitations();
         this.resetTurnState();
         options.callbacks.onError(error instanceof Error ? error : new Error(String(error)));
       });
@@ -1785,6 +1786,7 @@ export class AntigravitySession {
       .catch((error) => {
         if (this.closed || !this._turnInFlight) return;
         this.abortBackgroundWork(callbacks, 'Failed');
+        this.cancelPendingElicitations();
         this.resetTurnState();
         callbacks.onError(error instanceof Error ? error : new Error(String(error)));
       });
