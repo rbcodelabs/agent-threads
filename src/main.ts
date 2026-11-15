@@ -36,6 +36,7 @@ import type { createClaudeThreadsMcpServers, CronCreateParams, ProjectSnapshot, 
 import { createLoopbackMcpSource } from './remote/hostMcpClient';
 import { RemoteHostTools } from './remote/hostTools';
 import type { ContextPanelController } from './ContextPanelController';
+import type { WebViewerFeedbackDisposable } from './webViewerFeedback/registerWebViewerFeedback';
 import { detectHostName } from './hostEnvironment';
 import { GithubCredentialBroker, resolveGithubBridge } from './githubCredentials';
 import { GithubHostDelivery } from './githubHostDelivery';
@@ -326,6 +327,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   gitDiff: import('./GitDiffService').GitDiffService | null = null;
   documentWatch: import('./DocumentWatchService').DocumentWatchService | null = null;
   agentBrowser: import('./agentBrowser/AgentBrowserPool').AgentBrowserPool | null = null;
+  private webViewerFeedbackCleanup: (() => void) | null = null;
   /**
    * Shared login-handoff state (ADR-0014) for the Agent Browser pane and the
    * chat's browser session card. Null whenever the agent browser is off.
@@ -2043,6 +2045,27 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }),
     );
 
+    // ── Geode Web Viewer Element Feedback ("Pick element" → Thread) ─────────
+    // Capability-gated at runtime so plain Obsidian and older Geode builds silently no-op.
+    if (
+      typeof (this as unknown as { registerWebViewerFeedbackHandler?: unknown })
+        .registerWebViewerFeedbackHandler === 'function'
+    ) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { registerWebViewerFeedback } = require('./webViewerFeedback/registerWebViewerFeedback') as typeof import('./webViewerFeedback/registerWebViewerFeedback');
+      const disposable: WebViewerFeedbackDisposable | null = registerWebViewerFeedback(
+        this as unknown as Parameters<typeof registerWebViewerFeedback>[0],
+      );
+      if (disposable) {
+        const cleanup = () => {
+          disposable.dispose();
+          this.webViewerFeedbackCleanup = null;
+        };
+        this.webViewerFeedbackCleanup = cleanup;
+        this.register(cleanup);
+      }
+    }
+
     // Cmd/Ctrl+J: focus the Agent Board's Ask field. Declared in orchestratorDockCommand.ts; a normal command, so it is
     // listed (and rebindable) under Settings > Hotkeys. Falls through (explicit false) when no Board is the active view.
     this.addCommand(orchestratorDockCommand(() => {
@@ -3157,6 +3180,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // not await plugin onunload hooks, so delaying this would leave a stale
     // generation callable while sessions are draining.
     this.revokePublicApi();
+    this.webViewerFeedbackCleanup?.();
+    this.webViewerFeedbackCleanup = null;
 
     // Stop scheduler timers FIRST, before anything else — including before the
     // graceful-shutdown wait below. Obsidian's Component.unload() does not await
