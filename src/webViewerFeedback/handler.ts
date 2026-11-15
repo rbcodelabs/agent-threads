@@ -69,6 +69,10 @@ export interface WebViewerFeedbackHost {
   getActiveThreadId(): string | null;
   getEffectiveCwd(): string;
   getView?(): HandlerViewLike | null;
+  /**
+   * Optional hook indicating whether `WEB_VIEWER_NEW_THREAD_ID` dispatches to a remote
+   * daemon by default; when `true`, local host `fs` source-hint scanning is skipped.
+   */
   shouldRunNewThreadRemotely?(): boolean;
   dispatchNewThread(
     text: string,
@@ -313,45 +317,50 @@ export function createWebViewerFeedbackHandler(
         });
       }
 
-      const thread = host.manager.getThread(request.threadId);
-      if (!thread || thread.background || thread.status === 'archived') {
-        return {
-          status: 'rejected',
-          reason: 'unavailable',
-          message: 'Selected thread is no longer open.',
-        };
-      }
+      return coordinator.runIdempotent(dedupeKey, async () => {
+        const thread = host.manager.getThread(request.threadId);
+        if (!thread || thread.background || thread.status === 'archived') {
+          return {
+            status: 'rejected',
+            reason: 'unavailable',
+            message: 'Selected thread is no longer open.',
+          };
+        }
 
-      const isRemoteThread = Boolean(thread.remote);
-      const localCwd = resolveLocalThreadCwd(thread, host);
-      const repoSourceHints = await findRepoSourceHints({
-        cwd: localCwd,
-        isRemoteThread,
-        selection: request.selection,
-        signal: context.signal,
-      });
-      if (context.signal.aborted) {
-        return {
-          status: 'rejected',
-          reason: 'failed',
-          message: 'Feedback submission was cancelled.',
-        };
-      }
+        const isRemoteThread = Boolean(thread.remote);
+        const localCwd = resolveLocalThreadCwd(thread, host);
+        const repoSourceHints = await findRepoSourceHints({
+          cwd: localCwd,
+          isRemoteThread,
+          selection: request.selection,
+          signal: context.signal,
+        });
+        if (context.signal.aborted) {
+          return {
+            status: 'rejected',
+            reason: 'failed',
+            message: 'Feedback submission was cancelled.',
+          };
+        }
 
-      const prompt = buildWebViewerFeedbackPrompt({
-        request,
-        repoSourceHints,
-        escalationKeyword: host.settings.escalationKeyword,
-      });
+        const prompt = buildWebViewerFeedbackPrompt({
+          request,
+          repoSourceHints,
+          escalationKeyword: host.settings.escalationKeyword,
+        });
 
-      selectThreadWithoutStealingFocus(host, thread.id);
+        selectThreadWithoutStealingFocus(host, thread.id);
 
-      return coordinator.deliverOrQueue({
-        threadId: thread.id,
-        threadTitle: cleanSingleLine(thread.title, MAX_THREAD_TITLE_UNITS) || 'Thread',
-        prompt,
-        images,
-        dedupeKey,
+        return coordinator.deliverOrQueue(
+          {
+            threadId: thread.id,
+            threadTitle: cleanSingleLine(thread.title, MAX_THREAD_TITLE_UNITS) || 'Thread',
+            prompt,
+            images,
+            dedupeKey,
+          },
+          { skipDedupe: true },
+        );
       });
     },
   };

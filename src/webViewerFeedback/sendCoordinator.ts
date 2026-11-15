@@ -1,13 +1,16 @@
+import { logger } from '../logger';
 import type { ImageAttachment } from '../types';
 import type { WebViewerFeedbackResult } from './contract';
 
 /**
  * Coordinates Web Viewer element feedback delivery across multi-thread sessions:
  * - Immediate delivery (`manager.sendMessage`) when the destination thread is idle.
- * - 1-slot per-thread replacement queue (30m TTL) when the destination thread is busy,
- *   flushing automatically when the active turn finishes (`done` / `error` / `interrupted` / `run_state_settled`).
- * - Bounded idempotency cache (100 entries / 15m TTL) keyed by `${selectionId}:${threadId}:${comment}`
- *   so duplicate retries return the prior accepted outcome without double-sending.
+ * - 1-slot per-thread replacement queue (30m TTL) when the destination thread is busy
+ *   or mid-startup, flushing automatically when the active turn finishes
+ *   (`done` / `error` / `interrupted` / `run_state_settled`).
+ * - Bounded idempotency cache (100 entries / 15m TTL) keyed by
+ *   `JSON.stringify([selectionId, threadId, comment])` so duplicate retries return
+ *   the prior accepted outcome without double-sending.
  */
 
 export const DEFAULT_PENDING_TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -65,7 +68,7 @@ export function buildFeedbackDedupeKey(
   threadId: string,
   comment: string,
 ): string {
-  return `${selectionId}:${threadId}:${comment}`;
+  return JSON.stringify([selectionId, threadId, comment]);
 }
 
 export class WebViewerSendCoordinator {
@@ -145,10 +148,16 @@ export class WebViewerSendCoordinator {
         }
         return result;
       } catch (error) {
+        logger.tagged(
+          'warn',
+          'web-viewer-feedback',
+          'Failed to deliver element feedback to thread:',
+          error,
+        );
         return {
           status: 'rejected',
           reason: 'failed',
-          message: error instanceof Error ? error.message : 'Failed to deliver element feedback.',
+          message: 'Failed to deliver element feedback to thread.',
         };
       } finally {
         this.inFlightDedupe.delete(dedupeKey);
@@ -159,37 +168,50 @@ export class WebViewerSendCoordinator {
     return promise;
   }
 
-  async deliverOrQueue(input: DeliverOrQueueInput): Promise<WebViewerFeedbackResult> {
-    return this.runIdempotent(input.dedupeKey, async () => {
-      if (this.disposed) {
-        return {
-          status: 'rejected',
-          reason: 'unavailable',
-          message: 'Agent Threads feedback handler is disposed.',
-        };
-      }
+  async deliverOrQueue(
+    input: DeliverOrQueueInput,
+    options?: { readonly skipDedupe?: boolean },
+  ): Promise<WebViewerFeedbackResult> {
+    if (options?.skipDedupe) {
+      return this.deliverOrQueueInternal(input);
+    }
+    return this.runIdempotent(input.dedupeKey, () => this.deliverOrQueueInternal(input));
+  }
 
-      const thread = this.manager.getThread(input.threadId);
-      if (!thread || thread.background || thread.status === 'archived') {
-        return {
-          status: 'rejected',
-          reason: 'unavailable',
-          message: 'Selected thread is no longer open.',
-        };
-      }
+  private async deliverOrQueueInternal(
+    input: DeliverOrQueueInput,
+  ): Promise<WebViewerFeedbackResult> {
+    if (this.disposed) {
+      return {
+        status: 'rejected',
+        reason: 'unavailable',
+        message: 'Agent Threads feedback handler is disposed.',
+      };
+    }
 
-      if (this.manager.isRunning(input.threadId)) {
-        this.enqueueReplacementSlot(input);
-        return {
-          status: 'accepted',
-          delivery: 'queued',
-          threadId: input.threadId,
-          message: 'Thread is busy — queued for next turn',
-        };
-      }
+    const thread = this.manager.getThread(input.threadId);
+    if (!thread || thread.background || thread.status === 'archived') {
+      return {
+        status: 'rejected',
+        reason: 'unavailable',
+        message: 'Selected thread is no longer open.',
+      };
+    }
 
-      this.clearSlot(input.threadId);
-      const attachments = input.images.length > 0 ? [...input.images] : undefined;
+    if (this.manager.isRunning(input.threadId) || this.flushingThreads.has(input.threadId)) {
+      this.enqueueReplacementSlot(input);
+      return {
+        status: 'accepted',
+        delivery: 'queued',
+        threadId: input.threadId,
+        message: 'Thread is busy — queued for next turn',
+      };
+    }
+
+    this.clearSlot(input.threadId);
+    const attachments = input.images.length > 0 ? [...input.images] : undefined;
+    this.flushingThreads.add(input.threadId);
+    try {
       await this.manager.sendMessage(input.threadId, input.prompt, attachments);
       this.safeNotifyFlushed(input.threadId);
       return {
@@ -198,7 +220,16 @@ export class WebViewerSendCoordinator {
         threadId: input.threadId,
         message: `Sent to "${input.threadTitle}"`,
       };
-    });
+    } finally {
+      this.flushingThreads.delete(input.threadId);
+      if (
+        !this.disposed &&
+        this.pendingByThread.has(input.threadId) &&
+        !this.manager.isRunning(input.threadId)
+      ) {
+        void this.flushQueued(input.threadId);
+      }
+    }
   }
 
   dispose(): void {

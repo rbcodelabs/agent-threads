@@ -14,13 +14,27 @@ import {
 } from './helpers/webViewerFeedbackFixtures';
 
 describe('validateWebViewerPageTarget', () => {
-  it('accepts valid http and https page targets', () => {
+  it('accepts valid http and https page targets and stores canonical parsedUrl.href', () => {
     const httpRes = validateWebViewerPageTarget({
       url: 'http://127.0.0.1:5173/dashboard',
       origin: 'http://127.0.0.1:5173',
       title: 'Dashboard',
     });
     expect(httpRes.ok).toBe(true);
+
+    const bareOriginRes = validateWebViewerPageTarget({
+      url: 'http://localhost:3000',
+      origin: 'http://localhost:3000',
+      title: 'Home',
+    });
+    expect(bareOriginRes).toEqual({
+      ok: true,
+      value: {
+        url: 'http://localhost:3000/',
+        origin: 'http://localhost:3000',
+        title: 'Home',
+      },
+    });
 
     const httpsRes = validateWebViewerPageTarget({
       url: 'https://staging.example.com:8443/app/settings',
@@ -253,5 +267,74 @@ describe('validateWebViewerFeedbackRequest', () => {
         }),
       ).ok,
     ).toBe(false);
+  });
+
+  it('rejects own getter/setter accessor properties on plain objects and arrays without invoking getters', () => {
+    let getterInvoked = false;
+
+    // 1. Getter on top-level request field
+    const reqWithTopGetter = makeValidRequest() as unknown as Record<string, unknown>;
+    Object.defineProperty(reqWithTopGetter, 'comment', {
+      get() {
+        getterInvoked = true;
+        throw new Error('boom: top-level getter invoked');
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    const topRes = validateWebViewerFeedbackRequest(reqWithTopGetter);
+    expect(topRes).toEqual({ ok: false, message: 'Accessor properties are not allowed.' });
+    expect(getterInvoked).toBe(false);
+
+    // 2. Getter on screenshot.bytes (e.g. stateful getter attempting TOCTOU)
+    const screenshotWithGetter = { ...makeValidRequest().screenshot! } as Record<string, unknown>;
+    Object.defineProperty(screenshotWithGetter, 'bytes', {
+      get() {
+        getterInvoked = true;
+        throw new Error('boom: screenshot.bytes getter invoked');
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    const screenshotRes = validateWebViewerFeedbackRequest(
+      makeValidRequest({ screenshot: screenshotWithGetter as never }),
+    );
+    expect(screenshotRes).toEqual({ ok: false, message: 'Accessor properties are not allowed.' });
+    expect(getterInvoked).toBe(false);
+
+    // 3. Getter on an array index inside selection.selectorAlternates
+    const alternatesWithGetter: string[] = ['button.invoice-pay'];
+    Object.defineProperty(alternatesWithGetter, 0, {
+      get() {
+        getterInvoked = true;
+        throw new Error('boom: array index getter invoked');
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    const arrayRes = validateWebViewerFeedbackRequest(
+      makeValidRequest({
+        selection: makeValidSelection({ selectorAlternates: alternatesWithGetter }),
+      }),
+    );
+    expect(arrayRes).toEqual({ ok: false, message: 'Accessor properties are not allowed.' });
+    expect(getterInvoked).toBe(false);
+
+    // 4. Getter on validateWebViewerPageTarget input
+    const targetWithGetter: Record<string, unknown> = {
+      origin: 'http://localhost:3000',
+      title: 'Home',
+    };
+    Object.defineProperty(targetWithGetter, 'url', {
+      get() {
+        getterInvoked = true;
+        throw new Error('boom: target.url getter invoked');
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    const targetRes = validateWebViewerPageTarget(targetWithGetter);
+    expect(targetRes).toEqual({ ok: false, message: 'Accessor properties are not allowed.' });
+    expect(getterInvoked).toBe(false);
   });
 });

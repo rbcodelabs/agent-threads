@@ -29,21 +29,26 @@ function escapeRegExp(text: string): string {
 }
 
 /**
- * Strips C0 control characters (except `\n` and `\t`) and DEL (`\x7f`), after
- * normalizing `\r\n` and `\r` to `\n`.
+ * Strips C0 control characters (except `\n` and `\t`), DEL (`\x7f`), Unicode line/paragraph
+ * separators (`U+2028`, `U+2029`), directional marks (`U+061C`, `U+200E`, `U+200F`),
+ * bidi override/isolate code points (`U+202A..U+202E`, `U+2066..U+2069`), and BOM (`U+FEFF`),
+ * after normalizing `\r\n` and `\r` to `\n`.
  */
 export function stripControlChars(text: string): string {
   return text
     .replace(/\r\n?/g, '\n')
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+    .replace(
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g,
+      '',
+    );
 }
 
 /**
- * Additional sanitization for untrusted Origin-G strings: strips C0/DEL plus
- * Unicode bidi override / isolate spoofing characters.
+ * Sanitizes untrusted Origin-G strings (delegates to `stripControlChars`, which
+ * strips C0/DEL, line/paragraph separators, and bidi spoofing code points).
  */
 function sanitizeOriginGText(text: string): string {
-  return stripControlChars(text).replace(/[\u202a-\u202e\u2066-\u2069\ufeff]/g, '');
+  return stripControlChars(text);
 }
 
 /**
@@ -203,7 +208,10 @@ export function buildWebViewerFeedbackPrompt(
   const neutralize = (s: string): string =>
     neutralizeEscalationKeywords(stripControlChars(s), escalationKeyword);
 
-  const untrustedContent = serializeUntrustedPageData(request, escalationKeyword);
+  const untrustedContent = neutralizeEscalationKeywords(
+    serializeUntrustedPageData(request, escalationKeyword),
+    escalationKeyword,
+  );
   const cleanedComment = neutralize(request.comment);
 
   let token = generateBoundaryToken();

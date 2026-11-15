@@ -6,6 +6,7 @@ import {
   buildWebViewerFeedbackPrompt,
   deriveFeedbackTitleHint,
   isLoopbackPageOrigin,
+  stripControlChars,
 } from '../../src/webViewerFeedback/prompt';
 import { resolveHarnessPrompt } from '../../src/ThreadManager';
 import { makeValidRequest, makeValidSelection } from './helpers/webViewerFeedbackFixtures';
@@ -220,5 +221,33 @@ describe('buildWebViewerFeedbackPrompt', () => {
       'Fix button padding on mobile',
     );
     expect(deriveFeedbackTitleHint('x'.repeat(90)).length).toBeLessThanOrEqual(60);
+  });
+
+  it('strips U+2028, U+2029, and bidi override/isolate/mark code points in stripControlChars and neutralizes quote-synthesized custom keywords', () => {
+    const raw =
+      'Safe\u2028Line\u2029Para\u202eRLO\u202aLRE\u2066LRI\u2069PDI\u061cALM\u200eLRM\u200fRLM\ufeffEnd';
+    expect(stripControlChars(raw)).toBe('SafeLineParaRLOLRELRIPDIALMLRMRLMEnd');
+
+    // Custom keyword starting with `"` that JSON.stringify('/boost') would synthesize as `"/boost"`
+    const req = makeValidRequest({
+      comment: 'Check spacing on this route.',
+      selection: makeValidSelection({
+        route: '/boost',
+      }),
+    });
+    const prompt = buildWebViewerFeedbackPrompt({
+      request: req,
+      escalationKeyword: '"/boost',
+    });
+
+    const settingsQuoteKeyword = {
+      escalationEnabled: true,
+      escalationKeyword: '"/boost',
+      escalationModel: 'opus',
+    };
+    expect(() => resolveHarnessPrompt('codex', prompt, settingsQuoteKeyword)).not.toThrow();
+    const claudeRes = resolveHarnessPrompt('claude', prompt, settingsQuoteKeyword);
+    expect(claudeRes.model).toBeUndefined();
+    expect(claudeRes.promptText).toBe(prompt);
   });
 });

@@ -343,16 +343,12 @@ async function readBoundedTextFile(
   filePath: string,
   maxFileBytes: number,
 ): Promise<{ text: string; bytesRead: number } | null> {
-  let stat: fs.Stats;
+  let handle: fs.promises.FileHandle | undefined;
   try {
-    stat = await fs.promises.stat(filePath);
-  } catch {
-    return null;
-  }
-  if (!stat.isFile() || stat.size === 0) return null;
-  const toRead = Math.min(stat.size, maxFileBytes);
-  const handle = await fs.promises.open(filePath, 'r');
-  try {
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile() || stat.size === 0) return null;
+    const toRead = Math.min(stat.size, maxFileBytes);
+    handle = await fs.promises.open(filePath, 'r');
     const buffer = Buffer.allocUnsafe(toRead);
     const { bytesRead } = await handle.read(buffer, 0, toRead, 0);
     if (bytesRead === 0) return null;
@@ -364,8 +360,10 @@ async function readBoundedTextFile(
       text: buffer.subarray(0, bytesRead).toString('utf8'),
       bytesRead,
     };
+  } catch {
+    return null;
   } finally {
-    await handle.close();
+    await handle?.close().catch(() => undefined);
   }
 }
 
@@ -499,6 +497,16 @@ function confidenceFromCandidate(candidate: FileCandidate): RepoSourceHint['conf
 }
 
 export async function findRepoSourceHints(
+  options: FindRepoSourceHintsOptions,
+): Promise<RepoSourceHint[]> {
+  try {
+    return await findRepoSourceHintsInner(options);
+  } catch {
+    return [];
+  }
+}
+
+async function findRepoSourceHintsInner(
   options: FindRepoSourceHintsOptions,
 ): Promise<RepoSourceHint[]> {
   if (options.isRemoteThread || !options.cwd || !options.cwd.trim()) {

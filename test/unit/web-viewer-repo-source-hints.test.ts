@@ -209,6 +209,54 @@ describe('findRepoSourceHints', () => {
     expect(hints[0].line).toBe(1);
   });
 
+  it('degrades gracefully on unreadable (chmod 0o000 / EACCES) files without rejecting and still returns sibling hints', async () => {
+    const repo = createTempDir('wv-hints-eacces-');
+
+    writeRepoFile(
+      repo,
+      'src/components/UnreadableLocked.tsx',
+      '<button id="pay-invoice-btn" data-testid="pay-btn">Pay invoice</button>\n',
+    );
+    writeRepoFile(
+      repo,
+      'src/components/MockEacces.tsx',
+      '<button id="pay-invoice-btn" data-testid="pay-btn">Pay invoice</button>\n',
+    );
+    writeRepoFile(
+      repo,
+      'src/components/ReadableSibling.tsx',
+      'export const ReadableSibling = () => <button id="pay-invoice-btn" data-testid="pay-btn">Pay invoice</button>;\n',
+    );
+
+    const lockedPath = path.join(repo, 'src/components/UnreadableLocked.tsx');
+    fs.chmodSync(lockedPath, 0o000);
+
+    const realOpen = fs.promises.open.bind(fs.promises);
+    vi.spyOn(fs.promises, 'open').mockImplementation((async (filePath, flags, mode) => {
+      if (String(filePath).endsWith('MockEacces.tsx')) {
+        const err = Object.assign(new Error('EACCES: permission denied, open'), {
+          code: 'EACCES',
+        });
+        throw err;
+      }
+      return realOpen(filePath, flags, mode);
+    }) as typeof fs.promises.open);
+
+    try {
+      const hints = await findRepoSourceHints({
+        cwd: repo,
+        isRemoteThread: false,
+        selection: makeValidSelection(),
+        maxWallMs: 2000,
+      });
+
+      expect(hints.some((h) => h.relativePath === 'src/components/ReadableSibling.tsx')).toBe(true);
+      expect(hints.some((h) => h.relativePath === 'src/components/MockEacces.tsx')).toBe(false);
+    } finally {
+      fs.chmodSync(lockedPath, 0o644);
+    }
+  });
+
   it('filters common Tailwind utility classes while retaining semantic CSS classes', () => {
     expect(isUtilityCssClass('flex')).toBe(true);
     expect(isUtilityCssClass('items-center')).toBe(true);

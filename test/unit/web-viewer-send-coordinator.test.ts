@@ -10,7 +10,10 @@ import {
   type WebViewerFeedbackHost,
 } from '../../src/webViewerFeedback/handler';
 import { registerWebViewerFeedback } from '../../src/webViewerFeedback/registerWebViewerFeedback';
-import { WebViewerSendCoordinator } from '../../src/webViewerFeedback/sendCoordinator';
+import {
+  WebViewerSendCoordinator,
+  buildFeedbackDedupeKey,
+} from '../../src/webViewerFeedback/sendCoordinator';
 import type { ImageAttachment } from '../../src/types';
 import { makeValidPngBytes, makeValidRequest, makeValidSelection } from './helpers/webViewerFeedbackFixtures';
 
@@ -448,6 +451,167 @@ describe('WebViewerFeedbackHandler & WebViewerSendCoordinator', () => {
       message: 'Selected thread is no longer open.',
     });
 
+    // JSON-serialized tuple dedupe key avoids `:` delimiter collisions
+    expect(buildFeedbackDedupeKey('sel_a', 't:1', 'x')).not.toBe(
+      buildFeedbackDedupeKey('sel_a', 't', '1:x'),
+    );
+
+    coordinator.dispose();
+  });
+
+  it('queues a second pick arriving during pre-isRunning() async sendMessage startup and flushes cleanly once turn settles', async () => {
+    const { host, manager, running, emit, sendMessage } = createTestHarness({
+      threads: [
+        {
+          id: 'thread-startup',
+          title: 'Startup Race Thread',
+          cwd: '/tmp/nonexistent-test-cwd',
+          createdAt: 1000,
+        },
+      ],
+    });
+
+    let resolveStartup!: () => void;
+    const startupPromise = new Promise<void>((resolve) => {
+      resolveStartup = resolve;
+    });
+
+    // First sendMessage blocks in async session startup BEFORE isRunning() flips true
+    sendMessage
+      .mockImplementationOnce(async () => {
+        await startupPromise;
+        running.add('thread-startup');
+      })
+      .mockImplementationOnce(async () => undefined);
+
+    const coordinator = new WebViewerSendCoordinator(manager);
+    const handler = createWebViewerFeedbackHandler(host, coordinator);
+
+    const firstReq = makeValidRequest({
+      threadId: 'thread-startup',
+      comment: 'First pick triggers async session startup',
+      selection: makeValidSelection({
+        selectionId: 'sel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      }),
+    });
+    const firstSubmitPromise = handler.submit(firstReq, {
+      signal: new AbortController().signal,
+    });
+
+    // Yield microtasks so first submit reaches `await manager.sendMessage(...)`
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(manager.isRunning('thread-startup')).toBe(false);
+
+    // Second pick arrives while isRunning() is STILL false but first sendMessage is in-flight!
+    const secondReq = makeValidRequest({
+      threadId: 'thread-startup',
+      comment: 'Second pick during startup window must queue',
+      selection: makeValidSelection({
+        selectionId: 'sel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      }),
+    });
+    const secondRes = await handler.submit(secondReq, {
+      signal: new AbortController().signal,
+    });
+
+    expect(secondRes).toEqual({
+      status: 'accepted',
+      delivery: 'queued',
+      threadId: 'thread-startup',
+      message: 'Thread is busy — queued for next turn',
+    });
+    // Must NOT have invoked sendMessage concurrently during startup!
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(coordinator.hasPending('thread-startup')).toBe(true);
+
+    // Finish first sendMessage startup -> turn is now running
+    resolveStartup();
+    const firstRes = await firstSubmitPromise;
+    expect(firstRes).toEqual({
+      status: 'accepted',
+      delivery: 'sent',
+      threadId: 'thread-startup',
+      message: 'Sent to "Startup Race Thread"',
+    });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(coordinator.hasPending('thread-startup')).toBe(true);
+
+    // Settle first turn -> queued second pick flushes automatically
+    running.delete('thread-startup');
+    emit('thread-startup', { type: 'done' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage.mock.calls[1][1]).toContain(
+      'Second pick during startup window must queue',
+    );
+    expect(coordinator.hasPending('thread-startup')).toBe(false);
+
+    coordinator.dispose();
+  });
+
+  it('coalesces concurrent duplicate existing-thread submits before disk scan and scrubs internal host paths on unexpected sendMessage failure', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const realpathSpy = vi.spyOn(fs.promises, 'realpath');
+
+    const { host, manager, sendMessage, focusThread } = createTestHarness({
+      activeViewThreadId: 'other-thread',
+      threads: [
+        {
+          id: 'thread-coalesce',
+          title: 'Coalesce Thread',
+          cwd: '/tmp/nonexistent-test-cwd',
+          createdAt: 1000,
+        },
+      ],
+    });
+
+    const coordinator = new WebViewerSendCoordinator(manager);
+    const handler = createWebViewerFeedbackHandler(host, coordinator);
+
+    const dupReq = makeValidRequest({
+      threadId: 'thread-coalesce',
+      comment: 'Concurrent duplicate click',
+      selection: makeValidSelection({
+        selectionId: 'sel_cccccccccccccccccccccccccccccccc',
+      }),
+    });
+
+    const [resA, resB] = await Promise.all([
+      handler.submit(dupReq, { signal: new AbortController().signal }),
+      handler.submit(dupReq, { signal: new AbortController().signal }),
+    ]);
+
+    expect(resA).toEqual(resB);
+    expect(realpathSpy).toHaveBeenCalledTimes(1);
+    expect(focusThread).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    // Unexpected throw containing local host path must NOT leak path in returned UI message
+    sendMessage.mockRejectedValueOnce(
+      new Error('EACCES: permission denied, open /Users/secret-host/vault/.env'),
+    );
+    const failReq = makeValidRequest({
+      threadId: 'thread-coalesce',
+      comment: 'Trigger unexpected error',
+      selection: makeValidSelection({
+        selectionId: 'sel_dddddddddddddddddddddddddddddddd',
+      }),
+    });
+    const failRes = await handler.submit(failReq, {
+      signal: new AbortController().signal,
+    });
+
+    expect(failRes).toEqual({
+      status: 'rejected',
+      reason: 'failed',
+      message: 'Failed to deliver element feedback to thread.',
+    });
+    expect(failRes.status === 'rejected' && failRes.message).not.toContain('/Users/secret-host');
+
+    realpathSpy.mockRestore();
+    warnSpy.mockRestore();
     coordinator.dispose();
   });
 

@@ -164,7 +164,8 @@ function isUint8ArrayView(value: unknown): value is Uint8Array {
 
 /**
  * Bounded structural scan rejecting deep nesting, oversized containers, non-plain
- * prototypes, and prototype-pollution keys (`__proto__`, `constructor`, `prototype`).
+ * prototypes, accessor properties (getters/setters), symbol keys, and
+ * prototype-pollution keys (`__proto__`, `constructor`, `prototype`).
  */
 function assertSafeStructure(root: unknown): void {
   const stack: Array<{ value: unknown; depth: number }> = [{ value: root, depth: 0 }];
@@ -173,9 +174,21 @@ function assertSafeStructure(root: unknown): void {
     const { value, depth } = stack.pop()!;
     if (typeof value !== 'object' || value === null || ArrayBuffer.isView(value)) continue;
     if (depth > MAX_SCAN_DEPTH) fail('Input is nested too deeply.');
+    if (Object.getOwnPropertySymbols(value).length > 0) {
+      fail('Symbol properties are not allowed.');
+    }
     if (Array.isArray(value)) {
       if (value.length > MAX_ARRAY_LENGTH) fail('Input contains an array that is too long.');
-      for (const item of value) {
+      const arrayKeys = Object.getOwnPropertyNames(value);
+      if (arrayKeys.length > MAX_OBJECT_KEYS) fail('Input contains an array with too many keys.');
+      for (const key of arrayKeys) {
+        if (FORBIDDEN_KEYS.has(key)) fail(`Forbidden key "${key}" is not allowed.`);
+        const desc = Object.getOwnPropertyDescriptor(value, key);
+        if (!desc || desc.get !== undefined || desc.set !== undefined || !('value' in desc)) {
+          fail('Accessor properties are not allowed.');
+        }
+        if (key === 'length') continue;
+        const item = desc.value;
         if (typeof item === 'object' && item !== null) {
           if (++visited > MAX_SCAN_NODES) fail('Input contains too many nodes.');
           stack.push({ value: item, depth: depth + 1 });
@@ -188,7 +201,11 @@ function assertSafeStructure(root: unknown): void {
     if (keys.length > MAX_OBJECT_KEYS) fail('Input contains an object with too many keys.');
     for (const key of keys) {
       if (FORBIDDEN_KEYS.has(key)) fail(`Forbidden key "${key}" is not allowed.`);
-      const child = value[key];
+      const desc = Object.getOwnPropertyDescriptor(value, key);
+      if (!desc || desc.get !== undefined || desc.set !== undefined || !('value' in desc)) {
+        fail('Accessor properties are not allowed.');
+      }
+      const child = desc.value;
       if (typeof child === 'object' && child !== null) {
         if (++visited > MAX_SCAN_NODES) fail('Input contains too many nodes.');
         stack.push({ value: child, depth: depth + 1 });
@@ -199,23 +216,27 @@ function assertSafeStructure(root: unknown): void {
 
 function parsePageTarget(input: unknown): WebViewerPageTarget {
   const p = record(input, 'page');
-  const url = str(p.url, 'page.url', MAX_URL_LENGTH, 1);
-  if (/[\u0000-\u001f\u007f]/.test(url)) fail('page.url contains control characters.');
+  const rawUrl = str(p.url, 'page.url', MAX_URL_LENGTH, 1);
+  if (/[\u0000-\u001f\u007f]/.test(rawUrl)) fail('page.url contains control characters.');
   let parsedUrl: URL;
   try {
-    parsedUrl = new URL(url);
+    parsedUrl = new URL(rawUrl);
   } catch {
     fail('page.url is not a valid URL.');
   }
   if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
     fail('page.url must use http: or https: protocol.');
   }
+  const canonicalUrl = parsedUrl.href;
+  if (canonicalUrl.length > MAX_URL_LENGTH) {
+    fail(`page.url exceeds maximum length (${MAX_URL_LENGTH}).`);
+  }
   const origin = str(p.origin, 'page.origin', 512, 1);
   if (origin === 'null' || origin !== parsedUrl.origin) {
     fail('page.origin does not match page.url origin.');
   }
   const title = str(p.title, 'page.title', MAX_PAGE_TITLE_LENGTH, 0);
-  return { url, origin, title };
+  return { url: canonicalUrl, origin, title };
 }
 
 function parseComputedStyles(value: unknown): Readonly<Record<string, string>> {
@@ -357,8 +378,9 @@ function readUint32BE(bytes: Uint8Array, offset: number): number {
 function parseScreenshot(value: unknown): WebViewerElementScreenshot {
   const s = record(value, 'screenshot');
   if (s.mimeType !== 'image/png') fail('screenshot.mimeType must be "image/png".');
-  if (!isUint8ArrayView(s.bytes)) fail('screenshot.bytes must be a Uint8Array.');
-  const rawBytes = new Uint8Array(s.bytes.buffer, s.bytes.byteOffset, s.bytes.byteLength);
+  const bytes = s.bytes;
+  if (!isUint8ArrayView(bytes)) fail('screenshot.bytes must be a Uint8Array.');
+  const rawBytes = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (rawBytes.byteLength < 1 || rawBytes.byteLength > MAX_SCREENSHOT_BYTES) {
     fail('screenshot.bytes length is out of bounds (1..524288).');
   }
