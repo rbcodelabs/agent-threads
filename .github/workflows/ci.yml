@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
     name: Unit Tests
@@ -43,9 +47,42 @@ jobs:
       - name: Verify versions.json is in sync
         run: npm run check-versions
 
-  screenshots:
-    name: Screenshot Tests
+  browser:
+    name: Browser Tests
     runs-on: ubuntu-latest
+    # Keep tag synced with screenshots.container.image and the exact @playwright/test pin in package.json.
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
+      options: --ipc=host
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The image ships Node 24, matching the Unit Tests job.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run browser tests
+        run: npm run test:browser
+
+      - name: Upload Playwright browser report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-browser-report
+          path: |
+            playwright-browser-report/
+            test-results-browser/
+          retention-days: 14
+
+  screenshots:
+    name: Screenshot Tests (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['1/2', '2/2']
     # The canonical renderer. Baselines are generated in this exact image
     # (npm run test:screenshots:remote:update), so CI and the baseline host
     # share one browser build and one font set. The tag MUST equal the
@@ -64,13 +101,13 @@ jobs:
         run: npm ci
 
       - name: Run screenshot tests
-        run: npm run test:screenshots
+        run: npm run test:screenshots -- --shard=${{ matrix.shard }}
 
       - name: Upload Playwright report and diffs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-screenshots-report
+          name: playwright-screenshots-report-${{ strategy.job-index }}
           path: |
             playwright-report/
             test-results/

@@ -55,7 +55,8 @@ Run these checks before pushing. The PostToolUse hook will remind you if you for
 cd <worktree-path>
 npx tsc --noEmit                 # type-check (esbuild strips types silently — TSC catches the real errors)
 npm test                         # unit tests via vitest
-npm run test:screenshots:remote  # screenshots on dev-builder (2 intentional skips are normal)
+npm run test:browser             # parallel Playwright behavioral/layout browser tests (Mac + Linux)
+npm run test:screenshots:remote  # pixel-baseline screenshots on dev-builder (2 intentional skips are normal)
 ```
 
 **Run the typecheck + unit gate through the `tq` test-worker queue first** (operating guide: vault note `Agent How-Tos/Test Worker Pool`). Use the `agent-threads-unit` profile (npm ci, tsc, npm test on Node 22; defined in the testq repo). The commit must be pushed, and `--sha` must be the exact 40-hex SHA:
@@ -64,9 +65,9 @@ npm run test:screenshots:remote  # screenshots on dev-builder (2 intentional ski
 tq submit --repo rbcodelabs/agent-threads --sha "$(git rev-parse HEAD)" --profile agent-threads-unit --wait
 ```
 
-Exit 0 means passed; anything else is not a pass. Check reachability first: `tq` lives at `~/.local/bin/tq`, which may not be on `PATH` (`export PATH=$PATH:~/.local/bin`), then run `tq workers`. Never report the queue as "not installed" or "unreachable" without doing that. **Delegated agents must push their work branch (a draft PR is fine) so the gate can run on `tq`; the orchestrator submits it.** Only if `tq workers` actually fails (e.g. off the home LAN), fall back to running `npm ci && npx tsc --noEmit && npm test` locally, after checking `uptime` against the core count (see Machine Capacity in the global `CLAUDE.md`), and say in the report that it ran locally and why. Do not run the gate locally just because load is low while the queue is available. **Do not run `npm run test:screenshots` on the Mac** — see [Screenshot Tests](#screenshot-tests). Skipping the remote run and trusting the PR's "Screenshot Tests" CI job is acceptable.
+Exit 0 means passed; anything else is not a pass. Check reachability first: `tq` lives at `~/.local/bin/tq`, which may not be on `PATH` (`export PATH=$PATH:~/.local/bin`), then run `tq workers`. Never report the queue as "not installed" or "unreachable" without doing that. **Delegated agents must push their work branch (a draft PR is fine) so the gate can run on `tq`; the orchestrator submits it.** Only if `tq workers` actually fails (e.g. off the home LAN), fall back to running `npm ci && npx tsc --noEmit && npm test` locally, after checking `uptime` against the core count (see Machine Capacity in the global `CLAUDE.md`), and say in the report that it ran locally and why. Do not run the gate locally just because load is low while the queue is available. **Do not run `npm run test:screenshots` on the Mac** — see [Screenshot Tests](#screenshot-tests). Skipping the remote run and trusting the PR's sharded "Screenshot Tests" CI jobs is acceptable.
 
-Pass criteria: zero type errors, all unit tests green, screenshot count unchanged (or new tests added for new UI).
+Pass criteria: zero type errors, all unit and browser (`npm run test:browser`) tests green, screenshot baselines unchanged (or new baselines added for new UI).
 
 ---
 
@@ -159,6 +160,16 @@ When adding a new MCP tool or modifying serialization logic, add a corresponding
 
 ---
 
+## Browser Tests (Behavioral & Layout)
+
+```bash
+npm run test:browser
+```
+
+Located in `test/browser/` (`playwright.browser.config.ts`). Runs against the headless harness in `test/harness/` with parallel workers (`workers: 4` in CI, Playwright default locally) and **no pixel snapshot baselines**, so it runs cleanly on both macOS and Linux. Put DOM/state interaction, keyboard navigation, accessibility, and computed-style/bounding-box geometry assertions in `test/browser/` — reserve `test/screenshots/` strictly for tests that call `shot()` / `toHaveScreenshot()`.
+
+---
+
 ## Screenshot Tests
 
 ```bash
@@ -178,9 +189,10 @@ Baselines are **platform-neutral** (`snapshotPathTemplate` in `playwright.config
 drops the `{platform}` suffix: `main-view-chromium.png`, not
 `main-view-chromium-darwin.png`) and are rendered on Linux inside
 `mcr.microsoft.com/playwright:v<version>-noble`, where `<version>` is the
-exactly-pinned `@playwright/test` in `package.json`. The CI job "Screenshot
-Tests" (`.github/workflows/ci.yml`) runs in that same image, so dev-builder and
-CI share one browser build and one font set, and the tight `maxDiffPixels: 25`
+exactly-pinned `@playwright/test` in `package.json`. The sharded CI jobs
+"Screenshot Tests (1/2)" and "Screenshot Tests (2/2)" (`.github/workflows/ci.yml`)
+run in that same image with `workers: 1` per container, so dev-builder and CI
+share one browser build and one font set, and the tight `maxDiffPixels: 25`
 holds across them.
 
 **A Mac render will not match the baselines** — different rasteriser, hinting
@@ -193,10 +205,10 @@ and antialiasing. That is expected, not a regression. So:
   + `docs/*.png` (`:update`) or `playwright-report/` + `test-results/` on failure.
 - If dev-builder is unreachable (e.g. off the home LAN), a local
   `npm run test:screenshots` is **advisory only**; say so in the PR and rely on
-  the PR's CI job, which uploads `playwright-screenshots-report` (report + diffs)
-  as an artifact on failure.
-- **Bumping `@playwright/test`:** keep it exact (no `^`), and change the image tag
-  in `ci.yml` in the same PR, then regenerate every baseline with
+  the PR's sharded CI jobs, which upload `playwright-screenshots-report-*` (report + diffs)
+  as artifacts on failure.
+- **Bumping `@playwright/test`:** keep it exact (no `^`), and change both Playwright image tags
+  (`browser` and `screenshots`) in `ci.yml` in the same PR, then regenerate every baseline with
   `test:screenshots:remote:update`. The remote script derives its tag from
   `package.json` automatically.
 
@@ -226,7 +238,7 @@ scans `src/` for icon names, pulls each glyph from the exactly-pinned
 `lucide-static` dependency, and writes `test/harness/lucide-icons.generated.ts`
 (committed, so `tsc` and editors stay happy). The generator runs automatically
 at the top of `test/harness/esbuild.mjs`, so it fires on `npm run build:harness`
-and therefore on both `pretest:screenshots` hooks — the map cannot drift from
+and therefore on every `pretest:*` harness hook (`pretest:browser`, `pretest:screenshots`, `pretest:screenshots:update`) — the map cannot drift from
 `src/`. Run it directly with `npm run gen:harness-icons`.
 
 A new icon name in `src/` is picked up on the next harness build with no manual
