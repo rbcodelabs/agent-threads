@@ -113,6 +113,38 @@ describe('coordination tool scoping', () => {
     }
     expect(authorizeThread).toHaveBeenCalledTimes(cases.length);
   });
+
+  it('forwards elevatedProjectId for threads_set_notes and writes only when authorized', async () => {
+    const authorizeThread = vi.fn((threadId: string, elevatedProjectId: string | undefined, operation: string) =>
+      threadId === 'worker-disabled' && elevatedProjectId === 'project-disabled' && operation === 'notes',
+    );
+    const setThreadNotes = vi.fn();
+    const server = createClaudeThreadsMcpServers(app, {
+      threadId: 'portfolio',
+      authorizeThread,
+      setThreadNotes,
+    }).claude_threads as unknown as { tools: Array<{ name: string; handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }> }> };
+    const tool = server.tools.find(candidate => candidate.name === 'threads_set_notes')!;
+
+    const allowed = await tool.handler({
+      threadId: 'worker-disabled',
+      notes: 'Goal: ship fallback notes\nStrategy: minimal gate',
+      elevatedProjectId: 'project-disabled',
+    });
+    expect(authorizeThread).toHaveBeenCalledWith('worker-disabled', 'project-disabled', 'notes');
+    expect(allowed.isError).toBeUndefined();
+    expect(setThreadNotes).toHaveBeenCalledWith('worker-disabled', 'Goal: ship fallback notes\nStrategy: minimal gate');
+
+    const denied = await tool.handler({
+      threadId: 'worker-enabled',
+      notes: 'Should not write',
+      elevatedProjectId: 'project-enabled',
+    });
+    expect(authorizeThread).toHaveBeenCalledWith('worker-enabled', 'project-enabled', 'notes');
+    expect(denied.isError).toBe(true);
+    expect(denied.content[0]!.text).toContain('outside coordination scope');
+    expect(setThreadNotes).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('threads_set_proposed_reply with an open decision', () => {
