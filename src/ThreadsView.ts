@@ -885,7 +885,7 @@ export class ThreadsView extends ItemView {
     if (event.type === 'thread_deleted') this.repairSelectionAfterDelete(threadId);
     if (
       (event.type === 'summary_updated' || event.type === 'thread_deleted') &&
-      this.messagesEl?.querySelector(':scope > .ct-decision-cards')
+      this.messagesEl?.querySelector?.(':scope > .ct-decision-cards')
     ) {
       this.renderDecisionCards();
     }
@@ -2784,6 +2784,7 @@ export class ThreadsView extends ItemView {
    * the card and yank the scroll position.
    */
   private decisionDraftFor(key: string): QuestionDraft {
+    if (!this.decisionDrafts) this.decisionDrafts = new Map();
     let d = this.decisionDrafts.get(key);
     if (!d) {
       d = { fields: {} };
@@ -2798,8 +2799,8 @@ export class ThreadsView extends ItemView {
    * input the user is actively typing into.
    */
   private keepTrailingCardsAtBottom(): void {
-    if (!this.messagesEl) return;
-    const ae = document.activeElement;
+    if (!this.messagesEl?.querySelector) return;
+    const ae = typeof document !== 'undefined' ? document.activeElement : null;
     const trailing = [
       this.messagesEl.querySelector<HTMLElement>(':scope > .ct-decision-cards'),
       this.messagesEl.querySelector<HTMLElement>(':scope > .ct-proposed-reply-card'),
@@ -2826,10 +2827,10 @@ export class ThreadsView extends ItemView {
    */
   private renderDecisionCards(): void {
     const threadId = this.activeThreadId;
-    const thread = threadId ? this.manager.getThread(threadId) : null;
+    const thread = threadId ? this.manager?.getThread?.(threadId) : null;
     const decisions = thread?.pendingDecisions ?? [];
 
-    if (threadId && thread) {
+    if (threadId && thread && this.decisionDrafts) {
       const wantedIds = new Set(decisions.map((d) => d.id));
       const prefix = `${threadId}:d:`;
       for (const key of [...this.decisionDrafts.keys()]) {
@@ -2839,11 +2840,11 @@ export class ThreadsView extends ItemView {
       }
     }
 
-    let container = this.messagesEl?.querySelector<HTMLElement>(':scope > .ct-decision-cards') ?? null;
+    let container = this.messagesEl?.querySelector?.<HTMLElement>(':scope > .ct-decision-cards') ?? null;
     if (
-      !this.messagesEl ||
+      !this.messagesEl?.querySelector ||
       this.newConv ||
-      this.messagesEl.classList.contains('ct-messages-agent-view') ||
+      this.messagesEl.classList?.contains('ct-messages-agent-view') ||
       !threadId ||
       !thread ||
       decisions.length === 0
@@ -2880,7 +2881,7 @@ export class ThreadsView extends ItemView {
 
     let added = 0;
     for (const decision of decisions) {
-      const from = this.manager.getThread(decision.sourceThreadId)?.title;
+      const from = this.manager?.getThread?.(decision.sourceThreadId)?.title;
       const labelText = from ? `Decision for you · ${from}` : 'Decision for you';
       const existingCard = existingById.get(decision.id);
       if (existingCard) {
@@ -2919,8 +2920,8 @@ export class ThreadsView extends ItemView {
         submitBtn.disabled = true;
         try {
           await this.manager.answerDecision(threadId, decision.id, answer);
-          this.decisionDrafts.delete(draftKey);
-          void this.plugin.saveSettings();
+          this.decisionDrafts?.delete(draftKey);
+          void this.plugin?.saveSettings?.();
         } catch (err) {
           submitBtn.disabled = false;
           console.error('[claude-threads] failed to deliver decision answer:', err);
@@ -6982,8 +6983,8 @@ export class ThreadsView extends ItemView {
   }
 
   private dismissPendingDecisionsForManualSend(threadId: string): void {
-    if (this.manager.dismissDecisions(threadId)) {
-      void this.plugin.saveSettings();
+    if (this.manager?.dismissDecisions?.(threadId)) {
+      void this.plugin?.saveSettings?.();
     }
   }
 
