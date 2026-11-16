@@ -172,6 +172,7 @@ describe('src/main.ts source safety', () => {
       'WakeLockService',
       'ObsidianTools',
       'ClaudeSession',
+      'registerWebViewerFeedback',
     ];
 
     for (const mod of desktopOnlyModules) {

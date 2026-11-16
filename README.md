@@ -57,7 +57,7 @@ Then open the **Agents List**, press **New thread**, type what you want and hit 
 | **Control** | Inline permission cards, Plan Mode, cancel and restore, Always Allow rules, MCP elicitation |
 | **Vault integration** | `@` file mentions, clickable wikilinks, chat about or watch a note, edited-files focus, Skills Manager |
 | **Automation** | `/goal`, `/loop`, scheduled runs, Claude Code skills and slash commands, MCP servers (including OAuth ones) |
-| **Reach** | Remote daemons, a local container daemon, mobile remote access, push-to-talk voice input, an agent browser (Geode desktop) |
+| **Reach** | Remote daemons, a local container daemon, mobile remote access, push-to-talk voice input, an agent browser, and Web Viewer viewport presets (`Fill`, `Desktop`, `Tablet`, `Mobile`) with **Pick**-to-Thread element feedback (Geode desktop) |
 
 The complete list is in the [feature reference](docs/features.md).
 
