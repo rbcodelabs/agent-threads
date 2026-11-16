@@ -7,6 +7,8 @@
  *   TEXT (default)  thought + message chunks + usage, `end_turn`
  *   EDIT            a `write_file` tool with a diff, one `session/request_permission`, then completed (allow) or failed (deny)
  *   SHELL           a `run_command` tool with one permission request
+ *   ASK_QUESTION    an `ask_question` tool that sends `elicitation/create` when `clientCapabilities.elicitation.form` is
+ *                   advertised, or falls back to `[1]`/`[2]` bullets in chat when it is not
  *   HANG            streams one chunk, then waits for `session/cancel` and answers `stopReason: cancelled`
  *   CRASH           streams one chunk, then exits with code 1 mid-turn
  *
@@ -32,12 +34,15 @@ const denyFixture = fixture('deny-and-mode.json');
 const cancelFixture = fixture('cancel.json');
 const loadReplay = fixture('load-replay.json');
 const loadUnknown = fixture('load-unknown-id.json');
+const askQuestionFixture = fixture('ask-question-elicitation.json');
 
 const log = process.env.FAKE_ACP_LOG;
 const known = new Set((process.env.FAKE_ACP_KNOWN_SESSIONS ?? '').split(',').filter(Boolean));
 let counter = 0;
 let currentSession = '';
 let permissionId = 0;
+let supportsFormElicitation = false;
+let cancelledDuringPrompt = false;
 const pendingClientReplies = new Map();
 let cancelResolve = null;
 
@@ -60,6 +65,12 @@ function requestPermission(toolCall) {
     jsonrpc: '2.0', id, method: 'session/request_permission',
     params: { sessionId: currentSession, toolCall, options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }, { optionId: 'deny', name: 'Deny', kind: 'reject_once' }] },
   });
+  return new Promise((resolve) => pendingClientReplies.set(id, resolve));
+}
+
+function requestElicitation(params) {
+  const id = String(++permissionId);
+  write({ jsonrpc: '2.0', id, method: 'elicitation/create', params });
   return new Promise((resolve) => pendingClientReplies.set(id, resolve));
 }
 
@@ -139,6 +150,36 @@ async function runPrompt(sessionId, text) {
     await new Promise((resolve) => { cancelResolve = resolve; });
     return withSession(cancelFixture.response, sessionId).result;
   }
+  if (text.includes('ASK_QUESTION')) {
+    const start = withSession(askQuestionFixture.toolCall.params.update, sessionId);
+    const pending = withSession(askQuestionFixture.toolPending.params.update, sessionId);
+    update(sessionId, start);
+    update(sessionId, pending);
+    if (!supportsFormElicitation) {
+      update(sessionId, { ...start, sessionUpdate: 'tool_call_update', status: 'completed' });
+      update(sessionId, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Which events should pop a live alert?\n\n- [1] (Recommended) Direct personal triggers only\n- [2] All unread notifications' },
+      });
+      return stream.find((m) => m.result?.stopReason).result;
+    }
+    const elicitationParams = withSession(askQuestionFixture.elicitationRequest.params, sessionId);
+    const reply = await Promise.race([
+      requestElicitation(elicitationParams),
+      new Promise((resolve) => { cancelResolve = () => resolve({ __cancelled: true }); }),
+    ]);
+    cancelResolve = null;
+    if (cancelledDuringPrompt || reply?.__cancelled) {
+      return withSession(cancelFixture.response, sessionId).result;
+    }
+    update(sessionId, { ...start, sessionUpdate: 'tool_call_update', status: 'in_progress' });
+    update(sessionId, withSession(askQuestionFixture.toolCompleted.params.update, sessionId));
+    update(sessionId, {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: `Elicitation result: ${JSON.stringify(reply)}` },
+    });
+    return stream.find((m) => m.result?.stopReason).result;
+  }
   if (text.includes('EDIT')) {
     const start = toolFrame('tool_call', 'write_file');
     update(sessionId, start);
@@ -192,6 +233,7 @@ async function handle(message) {
   const ok = (result) => write({ jsonrpc: '2.0', id, result });
   switch (method) {
     case 'initialize':
+      supportsFormElicitation = Boolean(params?.clientCapabilities?.elicitation?.form);
       await sleep(Number(process.env.FAKE_ACP_START_DELAY_MS ?? 0));
       ok(initializeResponse);
       return;
@@ -222,12 +264,14 @@ async function handle(message) {
       ok(method === 'session/set_model' ? {} : { configOptions: sessionNewResponse.configOptions });
       return;
     case 'session/prompt': {
+      cancelledDuringPrompt = false;
       const text = (params.prompt ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('\n');
       const result = await runPrompt(String(params.sessionId), text);
       ok(result);
       return;
     }
     case 'session/cancel':
+      cancelledDuringPrompt = true;
       cancelResolve?.();
       cancelResolve = null;
       return;

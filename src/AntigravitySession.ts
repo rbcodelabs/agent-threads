@@ -19,6 +19,11 @@
  *   soon as `session/prompt` returns, before background subagents finish and wake the parent up. When `<brainDir>/<id>`
  *   is present on disk, the adapter tails the parent and child JSONL transcripts to emit `onTaskStarted`,
  *   `onTaskProgress`, `onTaskUpdated`, `onTaskNotification`, and post-ACP wakeup messages before closing the turn.
+ * - Structured agent questions (`ask_question`): `initialize` advertises `clientCapabilities.elicitation.form` so `agy acp`
+ *   takes `askQuestionWithForm` (`elicitation/create` with `<key>` + `<key>_other` JSON-schema properties) instead of
+ *   dumping numbered `[1]`/`[2]` bullets into chat (`askQuestionInChat`). The adapter pairs those fields into native
+ *   `AskQuestion[]` cards (`callbacks.onAskUserQuestion`) and translates answers/cancellations back into ACP elicitation
+ *   results.
  * - `session/cancel` is a notification; the in-flight `session/prompt` then resolves `stopReason: cancelled`.
  * - `session/load` REPLAYS history as ordinary updates BEFORE its response, and a bad session id does not error (it
  *   quietly creates a fresh session under that id). So replay is swallowed, and "zero replayed history" is the only
@@ -29,7 +34,7 @@
  * mobile.
  */
 import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
-import type { AgentHarness, ImageAttachment, ToolCallRecord } from './types';
+import type { AgentHarness, AskQuestion, ImageAttachment, ToolCallRecord } from './types';
 import { parseExtraEnv } from './types';
 import { isEditDenied, isShellDenied } from './toolRestrictions';
 import type { SessionCallbacks } from './ClaudeSession';
@@ -382,6 +387,207 @@ const UNLOGGED_UPDATES = new Set(['agent_message_chunk', 'agent_thought_chunk', 
 /** Updates that are part of the conversation history replayed by `session/load`. */
 const HISTORY_UPDATES = new Set(['user_message_chunk', 'agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update']);
 
+export interface AntigravityElicitationOption {
+  constValue: string;
+  label: string;
+  description: string;
+}
+
+export interface AntigravityParsedQuestionField {
+  id: string;
+  question: string;
+  multiSelect: boolean;
+  options: AntigravityElicitationOption[];
+  otherKey?: string;
+  allowOther: boolean;
+  askQuestion: AskQuestion;
+}
+
+export interface AntigravityElicitationParams {
+  sessionId?: string;
+  toolCallId?: string;
+  elicitationId?: string;
+  mode?: string;
+  message?: string;
+  requestedSchema?: Record<string, any>;
+}
+
+function extractSchemaChoices(entries: unknown): AntigravityElicitationOption[] {
+  if (!Array.isArray(entries)) return [];
+  const options: AntigravityElicitationOption[] = [];
+  for (const entry of entries) {
+    if (typeof entry === 'string' && entry) {
+      options.push({ constValue: entry, label: entry, description: '' });
+      continue;
+    }
+    if (!entry || typeof entry !== 'object') continue;
+    const obj = entry as Record<string, unknown>;
+    if (obj.const === undefined || obj.const === null) continue;
+    const constValue = String(obj.const);
+    const label = typeof obj.title === 'string' && obj.title.trim() ? obj.title : constValue;
+    const description = typeof obj.description === 'string' ? obj.description : '';
+    options.push({ constValue, label, description });
+  }
+  return options;
+}
+
+function propHasSelectableChoices(prop: Record<string, any> | undefined): boolean {
+  if (!prop || typeof prop !== 'object') return false;
+  if (prop.type === 'array') {
+    const items = prop.items;
+    return Array.isArray(items?.anyOf) || Array.isArray(items?.oneOf) || Array.isArray(items?.enum);
+  }
+  return Array.isArray(prop.oneOf) || Array.isArray(prop.anyOf) || Array.isArray(prop.enum);
+}
+
+/**
+ * Parse an ACP `elicitation/create` form request (`agy acp`'s `ask_question` schema) into `AskQuestion` descriptors.
+ * Returns `null` when the request is not a supported form elicitation (e.g. `mode: "url"` or non-question JSON types).
+ */
+export function parseAntigravityElicitation(
+  params: AntigravityElicitationParams | undefined,
+): AntigravityParsedQuestionField[] | null {
+  if (!params || typeof params !== 'object') return null;
+  if (params.mode !== undefined && params.mode !== 'form') return null;
+  const props = params.requestedSchema?.properties;
+  if (!props || typeof props !== 'object' || Array.isArray(props)) return null;
+
+  const propEntries = Object.entries(props as Record<string, any>);
+  if (propEntries.length === 0) return null;
+
+  // `agy acp` emits `<key>` (choices) paired with `<key>_other` (`type: "string"`, title `"Other"`).
+  const consumedOtherKeys = new Set<string>();
+  const pairedOtherForKey = new Map<string, string>();
+  for (const [key, prop] of propEntries) {
+    if (!propHasSelectableChoices(prop)) continue;
+    const candidateOther = `${key}_other`;
+    const otherProp = (props as Record<string, any>)[candidateOther];
+    if (otherProp && typeof otherProp === 'object' && otherProp.type === 'string') {
+      consumedOtherKeys.add(candidateOther);
+      pairedOtherForKey.set(key, candidateOther);
+    }
+  }
+
+  const toolCallId = typeof params.toolCallId === 'string' && params.toolCallId ? params.toolCallId : undefined;
+  const fields: AntigravityParsedQuestionField[] = [];
+  for (const [key, prop] of propEntries) {
+    if (consumedOtherKeys.has(key)) continue;
+    if (!prop || typeof prop !== 'object') return null;
+    const multiSelect = prop.type === 'array';
+    const options = multiSelect
+      ? extractSchemaChoices(prop.items?.anyOf ?? prop.items?.oneOf ?? prop.items?.enum)
+      : extractSchemaChoices(prop.oneOf ?? prop.anyOf ?? prop.enum);
+
+    if (options.length === 0 && prop.type !== 'string') {
+      // Unsupported primitive (e.g. boolean/number/object from a generic MCP form) — decline rather than mis-typing.
+      return null;
+    }
+
+    const otherKey = pairedOtherForKey.get(key);
+    const allowOther = options.length === 0 ? true : Boolean(otherKey);
+    const question = typeof prop.title === 'string' && prop.title.trim()
+      ? prop.title.trim()
+      : typeof prop.description === 'string' && prop.description.trim()
+        ? prop.description.trim()
+        : key;
+
+    fields.push({
+      id: key,
+      question,
+      multiSelect,
+      options,
+      otherKey,
+      allowOther,
+      askQuestion: {
+        id: key,
+        question,
+        header: '',
+        options: options.map(({ label, description }) => ({ label, description })),
+        multiSelect,
+        allowOther,
+        source: HARNESS,
+        ...(toolCallId ? { requestItemId: toolCallId } : {}),
+      },
+    });
+  }
+
+  return fields.length > 0 ? fields : null;
+}
+
+/**
+ * Decompose `QuestionForm`'s comma-joined multi-select string back into ordered option `const` values plus an optional
+ * trailing write-in string, without corrupting option labels that themselves contain commas.
+ */
+function matchMultiSelectAnswer(
+  idx: number,
+  remaining: string | null,
+  options: readonly AntigravityElicitationOption[],
+  chosenConsts: string[],
+  allowTrailingOther: boolean,
+): { consts: string[]; writeIn?: string } | null {
+  if (remaining === null) return { consts: chosenConsts };
+  if (idx === options.length) {
+    if (allowTrailingOther && remaining.trim().length > 0) {
+      return { consts: chosenConsts, writeIn: remaining.trim() };
+    }
+    return null;
+  }
+  const opt = options[idx];
+  if (remaining === opt.label) {
+    return matchMultiSelectAnswer(options.length, null, options, [...chosenConsts, opt.constValue], allowTrailingOther);
+  }
+  if (remaining.startsWith(`${opt.label},`)) {
+    const rest = remaining.slice(opt.label.length + 1);
+    const withOpt = matchMultiSelectAnswer(idx + 1, rest, options, [...chosenConsts, opt.constValue], allowTrailingOther);
+    if (withOpt) return withOpt;
+  }
+  return matchMultiSelectAnswer(idx + 1, remaining, options, chosenConsts, allowTrailingOther);
+}
+
+/**
+ * Build the ACP `CreateElicitationResult` (`{ action: 'accept', content }` or `{ action: 'cancel' }`) from the answers
+ * map returned by `callbacks.onAskUserQuestion`.
+ *
+ * `ThreadManager` resolves `{}` (zero keys) when a prompt is aborted by generation fence or interrupt, whereas
+ * `QuestionForm.collect()` always populates a key per question (even when left blank).
+ */
+export function buildAntigravityElicitationReply(
+  fields: readonly AntigravityParsedQuestionField[],
+  answers: Record<string, string>,
+): Record<string, unknown> {
+  if (!answers || Object.keys(answers).length === 0) return { action: 'cancel' };
+  const content: Record<string, unknown> = {};
+
+  for (const field of fields) {
+    const raw = answers[field.id] ?? answers[field.question] ?? '';
+    if (!raw || !raw.trim()) continue;
+
+    if (field.options.length === 0) {
+      content[field.id] = raw.trim();
+      continue;
+    }
+
+    if (!field.multiSelect) {
+      const exact = field.options.find((opt) => opt.label === raw || opt.label === raw.trim());
+      if (exact) {
+        content[field.id] = exact.constValue;
+      } else if (field.otherKey) {
+        content[field.otherKey] = raw.trim();
+      }
+      continue;
+    }
+
+    // Pass 1 prefers a 100% option-only match so an option containing a comma is never split into prefix + Other.
+    const parsed = matchMultiSelectAnswer(0, raw, field.options, [], false)
+      ?? (field.allowOther ? matchMultiSelectAnswer(0, raw, field.options, [], true) : null);
+    if (!parsed) continue;
+    if (parsed.consts.length > 0) content[field.id] = parsed.consts;
+    if (parsed.writeIn && field.otherKey) content[field.otherKey] = parsed.writeIn;
+  }
+
+  return { action: 'accept', content };
+}
+
 // ── Session ────────────────────────────────────────────────────────────────
 
 export type AntigravityClientFactory = (options: AcpClientOptions) => AcpClient;
@@ -416,6 +622,8 @@ export class AntigravitySession {
   private settledTools = new Set<string>();
   private toolStartedAt = new Map<string, number>();
   private pendingPermissions = new Map<string, (outcome: Record<string, unknown>) => void>();
+  private pendingElicitations = new Map<string, (result: Record<string, unknown>) => void>();
+  private elicitationSeq = 0;
   private currentMode: string | undefined;
   private activeModel = '';
   private latestContextUsage: HarnessContextUsage | null = null;
@@ -452,8 +660,9 @@ export class AntigravitySession {
   get turnInFlight(): boolean { return this._turnInFlight; }
   get cwd(): string | undefined { return this.options?.cwd; }
   get hasPendingPermission(): boolean { return this.pendingPermissions.size > 0; }
+  get hasPendingElicitation(): boolean { return this.pendingElicitations.size > 0; }
   canIdleReap(): boolean {
-    return !this._turnInFlight && !this.hasPendingPermission && !this.restartingClient && !this.hasRunningSubagents();
+    return !this._turnInFlight && !this.hasPendingPermission && !this.hasPendingElicitation && !this.restartingClient && !this.hasRunningSubagents();
   }
 
   async start(options: HarnessSessionOptions): Promise<void> {
@@ -568,14 +777,20 @@ export class AntigravitySession {
     this.spawnedWithSkipPermissions = skipPermissions;
     client.onNotification('session/update', (params) => this.handleSessionUpdate(params));
     client.onRequest('session/request_permission', (params) => this.handlePermissionRequest(params));
+    client.onRequest('elicitation/create', (params) => this.handleElicitationCreate(params));
     client.onProtocolError((line, error) => console.warn('[ClaudeThreads] Unparseable Antigravity line:', line.slice(0, 200), error.message));
     client.onClose((error) => this.handleClientClosed(client, error));
     client.spawn();
 
     const init = await client.request('initialize', {
       protocolVersion: ACP_PROTOCOL_VERSION,
-      // agy owns its tools and file access; nothing is delegated to the client.
-      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+      // agy owns its tools and file access; advertise form elicitation so `ask_question` uses `elicitation/create`
+      // instead of falling back to plain-text `[1]`/`[2]` bullets in chat.
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        terminal: false,
+        elicitation: { form: {} },
+      },
     }, client.startTimeoutMs);
     options.callbacks.onRawEvent?.({ type: 'antigravity/initialize', agentInfo: init?.agentInfo, protocolVersion: init?.protocolVersion });
     const canLoad = Boolean(init?.agentCapabilities?.loadSession ?? init?.agentCapabilities?.load_session);
@@ -817,6 +1032,7 @@ export class AntigravitySession {
       .catch((error) => {
         if (this.closed || !this._turnInFlight) return;
         this.abortBackgroundWork(options.callbacks, 'Failed');
+        this.cancelPendingElicitations();
         this.resetTurnState();
         options.callbacks.onError(error instanceof Error ? error : new Error(String(error)));
       });
@@ -825,8 +1041,9 @@ export class AntigravitySession {
   async interrupt(): Promise<void> {
     if (!this.client || !this.sessionId || !this._turnInFlight) return;
     this.queuedTurns = [];
-    // A pending approval would otherwise keep the agent waiting on us: answer it as cancelled first.
+    // A pending approval or question would otherwise keep the agent waiting on us: answer it as cancelled first.
     for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
+    this.cancelPendingElicitations();
     this.client.notify('session/cancel', { sessionId: this.sessionId });
     // When `session/prompt` already ended and we are holding the turn open for background subagents/wakeups, there is
     // no pending `session/prompt` RPC left to resolve `stopReason: cancelled` — settle the interrupted turn right here.
@@ -852,6 +1069,7 @@ export class AntigravitySession {
     this.activeBgTaskIds.clear();
     for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
     this.pendingPermissions.clear();
+    this.cancelPendingElicitations();
     // `session/close` is advertised but not called: the process is killed instead, and the saved session must stay
     // loadable for resume.
     const oldClient = this.client;
@@ -905,6 +1123,7 @@ export class AntigravitySession {
     this.closed = true;
     this.resetTurnState();
     this.pendingPermissions.clear();
+    this.cancelPendingElicitations();
     this.bridge?.close();
     this.bridge = null;
     callbacks?.onError(failure);
@@ -1131,6 +1350,7 @@ export class AntigravitySession {
 
   private hasPendingBackgroundActivity(now: number): boolean {
     if (this.promotingWakeup) return true;
+    if (this.pendingElicitations.size > 0) return true;
     if (this.hasRunningSubagents()) return true;
     if (this.activeBgTaskIds.size > 0) return true;
     if (this.parentWakeupInFlight) return true;
@@ -1174,6 +1394,7 @@ export class AntigravitySession {
       !this.spawnedWithSkipPermissions &&
       this.wakeupToolStallDeadlineMs > 0 &&
       this.bridgeCallsInFlight === 0 &&
+      this.pendingElicitations.size === 0 &&
       this.hasPermissionSensitiveWakeupTool() &&
       Date.now() >= this.wakeupToolStallDeadlineMs
     ) {
@@ -1565,6 +1786,7 @@ export class AntigravitySession {
       .catch((error) => {
         if (this.closed || !this._turnInFlight) return;
         this.abortBackgroundWork(callbacks, 'Failed');
+        this.cancelPendingElicitations();
         this.resetTurnState();
         callbacks.onError(error instanceof Error ? error : new Error(String(error)));
       });
@@ -1644,6 +1866,48 @@ export class AntigravitySession {
         .then((allow) => settle(allow ? select('allow_once', 'allow') : select('reject_once', 'deny')))
         .catch(() => settle(select('reject_once', 'deny')));
     });
+  }
+
+  /** Public for tests: answer one ACP `elicitation/create` request (wired to `callbacks.onAskUserQuestion`). */
+  async handleElicitationCreate(params: AntigravityElicitationParams | undefined): Promise<Record<string, unknown>> {
+    const callbacks = this.options?.callbacks;
+    if (!callbacks || this.closed) return { action: 'cancel' };
+    callbacks.onRawEvent?.({
+      type: 'antigravity/elicitation_create',
+      toolCallId: params?.toolCallId,
+      mode: params?.mode,
+      message: params?.message,
+      requestedSchema: params?.requestedSchema,
+    });
+    // Never stall an unattended/scheduled `dontAsk` run; `{ action: 'cancel' }` resolves `User Skipped` in `agy`
+    // without triggering the JSON-RPC error fallback that dumps questions into chat.
+    if ((this.options?.permissionMode ?? 'default') === 'dontAsk') return { action: 'cancel' };
+
+    const fields = parseAntigravityElicitation(params);
+    if (!fields) return { action: 'decline' };
+    if (!callbacks.onAskUserQuestion) return { action: 'cancel' };
+
+    const key = `${params?.elicitationId ?? params?.toolCallId ?? 'elicitation'}-${++this.elicitationSeq}`;
+    return new Promise<Record<string, unknown>>((resolve) => {
+      let answered = false;
+      const settle = (result: Record<string, unknown>) => {
+        if (answered) return;
+        answered = true;
+        this.pendingElicitations.delete(key);
+        resolve(result);
+      };
+      this.pendingElicitations.set(key, settle);
+      callbacks.onAskUserQuestion(fields.map((field) => field.askQuestion))
+        .then((answers) => settle(buildAntigravityElicitationReply(fields, answers)))
+        .catch(() => settle({ action: 'cancel' }));
+    });
+  }
+
+  private cancelPendingElicitations(): void {
+    if (this.pendingElicitations.size === 0) return;
+    for (const resolve of [...this.pendingElicitations.values()]) resolve({ action: 'cancel' });
+    this.pendingElicitations.clear();
+    this.options?.callbacks.onAskUserQuestionCanceled?.();
   }
 
   private isBridgedHostTool(tool: AcpToolCall): boolean {

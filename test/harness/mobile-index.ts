@@ -17,6 +17,7 @@
 import './obsidian-mock';
 import { MobileView } from '../../src/MobileView';
 import { MobileThreadStore } from '../../src/MobileThreadStore';
+import { parseAntigravityElicitation } from '../../src/AntigravitySession';
 import { mockLeaf } from './obsidian-mock';
 import { fixtureThreads, inlineContentMessages, overflowStressMessages } from './fixtures';
 import type { RelayFrame } from '../../src/relay-protocol';
@@ -222,6 +223,54 @@ if (view === 'mobile-overflow') {
         ],
       },
     ],
+  });
+
+  const mobileView = new MobileView(mockLeaf as any, relay as any, store);
+  app.appendChild(mobileView.containerEl);
+  mobileView.onOpen();
+  (window as any).__mobileView = mobileView;
+  (window as any).__store = store;
+
+} else if (view === 'mobile-question-antigravity') {
+  const fields = parseAntigravityElicitation({
+    sessionId: 'agy-mobile-fixture',
+    toolCallId: 'call_ask_question_1',
+    mode: 'form',
+    message: 'The agent has 2 questions.',
+    requestedSchema: {
+      type: 'object',
+      properties: {
+        q1: {
+          type: 'string',
+          title: 'Which events should pop a live alert?',
+          oneOf: [
+            { const: '1', title: '(Recommended) Direct personal triggers only (Task ASSIGNED + @MENTIONED)' },
+            { const: '2', title: 'All unread notifications (assignments, mentions, comments, and status changes)' },
+          ],
+        },
+        q1_other: { type: 'string', title: 'Other' },
+        q2: {
+          type: 'array',
+          title: 'Pick toppings?',
+          items: {
+            anyOf: [
+              { const: '1', title: 'Cheese, aged cheddar' },
+              { const: '2', title: 'Peppers, roasted' },
+            ],
+          },
+        },
+        q2_other: { type: 'string', title: 'Other' },
+      },
+    },
+  })!;
+  const store = new MobileThreadStore();
+  const relay = new MockRelayClient();
+  store.applyFrame(serializedFixtures(fixtureThreads[0].id));
+  store.applyFrame({
+    type: 'question_request',
+    threadId: fixtureThreads[0].id,
+    requestId: 'question-fixture-agy-001',
+    questions: fields.map((f) => f.askQuestion),
   });
 
   const mobileView = new MobileView(mockLeaf as any, relay as any, store);
