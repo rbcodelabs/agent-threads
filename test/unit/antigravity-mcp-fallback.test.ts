@@ -9,7 +9,7 @@ import {
   handleHostToolsRpc,
   type OpenCodeHostToolsContext,
 } from '../../src/OpenCodeHostTools';
-import { ExternalMcpClientPool } from '../../src/antigravityMcpFallback';
+import { ExternalMcpClientPool, formatExternalMcpToolResult } from '../../src/antigravityMcpFallback';
 import {
   AntigravitySession,
   antigravityToolName,
@@ -306,6 +306,188 @@ describe('call_mcp_tool opt-in & compact schema', () => {
   });
 });
 
+// ── 1b. formatExternalMcpToolResult structuredContent handling ─────────────
+
+describe('formatExternalMcpToolResult structuredContent handling', () => {
+  it('preserves human summary AND appends object structuredContent (prepare_doc_image_upload shape) while dropping _meta', () => {
+    const summaryText =
+      '**Private Docs image upload prepared**\n'
+      + 'ID: img-42\n'
+      + 'Pathname: docs/ws-1/img-42.png\n'
+      + 'Expires: 2026-11-15T23:59:00.000Z\n'
+      + 'Image URL: /api/docs/images/img-42\n'
+      + 'Markdown: ![shot.png](/api/docs/images/img-42)\n'
+      + 'Upload with @vercel/blob/client put(pathname, file, { access: "private", token: clientToken, contentType: fileType }).';
+    const structuredContent = {
+      imageId: 'img-42',
+      pathname: 'docs/ws-1/img-42.png',
+      clientToken: 'test-client-token-doc-img-42',
+      expiresAt: '2026-11-15T23:59:00.000Z',
+      url: '/api/docs/images/img-42',
+      markdown: '![shot.png](/api/docs/images/img-42)',
+    };
+
+    const result = formatExternalMcpToolResult({
+      content: [{ type: 'text', text: summaryText }],
+      structuredContent,
+      _meta: { traceSecret: 'never-forward-meta' },
+      isError: false,
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toBe(`${summaryText}\n\nstructuredContent:\n${JSON.stringify(structuredContent)}`);
+    const jsonSuffix = result.text.split('\n\nstructuredContent:\n')[1]!;
+    expect(JSON.parse(jsonSuffix)).toEqual(structuredContent);
+    expect(result.structuredContent).toEqual(structuredContent);
+    expect(result.text).not.toContain('never-forward-meta');
+    expect('_meta' in result).toBe(false);
+  });
+
+  it('preserves summary text and appends envelope structuredContent with clientToken and receipt (prepare_artifact_upload / prepare_feedback_attachment_upload shape)', () => {
+    const summaryText =
+      '**Artifact upload prepared**\n'
+      + 'Upload ID: up-7\n'
+      + 'Pathname: artifacts/ws-1/up-7.html\n'
+      + 'Expires: 2026-11-15T23:59:00.000Z';
+    const structuredContent = {
+      ok: true,
+      message: summaryText,
+      data: {
+        uploadId: 'up-7',
+        pathname: 'artifacts/ws-1/up-7.html',
+        clientToken: 'test-client-token-artifact-7',
+        receipt: 'test-receipt-7',
+        expiresAt: '2026-11-15T23:59:00.000Z',
+      },
+    };
+
+    const result = formatExternalMcpToolResult({
+      content: [{ type: 'text', text: summaryText }],
+      structuredContent,
+      isError: false,
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toBe(`${summaryText}\n\nstructuredContent:\n${JSON.stringify(structuredContent)}`);
+    expect(result.text).toContain('test-client-token-artifact-7');
+    expect(result.text).toContain('test-receipt-7');
+    expect(result.structuredContent).toEqual(structuredContent);
+  });
+
+  it('formats image placeholder + text and appends structuredContent', () => {
+    const fakePng = Buffer.alloc(4096, 1).toString('base64');
+    const structuredContent = { width: 1280, height: 800 };
+
+    const result = formatExternalMcpToolResult({
+      content: [
+        { type: 'text', text: 'Captured' },
+        { type: 'image', mimeType: 'image/png', data: fakePng },
+      ],
+      structuredContent,
+      isError: false,
+    });
+
+    expect(result).toEqual({
+      isError: false,
+      text: 'Captured\n[image: image/png, 4kB]\n\nstructuredContent:\n{"width":1280,"height":800}',
+      structuredContent,
+    });
+  });
+
+  it('returns pure JSON.stringify(structuredContent) without prefix when content is empty or whitespace-only', () => {
+    const structuredContent = { ok: true, count: 3 };
+
+    expect(formatExternalMcpToolResult({ content: [], structuredContent })).toEqual({
+      isError: false,
+      text: '{"ok":true,"count":3}',
+      structuredContent,
+    });
+
+    expect(
+      formatExternalMcpToolResult({
+        content: [{ type: 'text', text: '   \n\t  ' }],
+        structuredContent,
+      }),
+    ).toEqual({
+      isError: false,
+      text: '{"ok":true,"count":3}',
+      structuredContent,
+    });
+  });
+
+  it('suppresses duplicate structuredContent block when content text already equals compact or pretty-printed JSON', () => {
+    const structuredContent = { ok: true, nested: { count: 3 } };
+    const compact = JSON.stringify(structuredContent);
+    const pretty = JSON.stringify(structuredContent, null, 2);
+
+    const compactRes = formatExternalMcpToolResult({
+      content: [{ type: 'text', text: compact }],
+      structuredContent,
+    });
+    expect(compactRes.text).toBe(compact);
+    expect(compactRes.text).not.toContain('structuredContent:');
+    expect(compactRes.structuredContent).toEqual(structuredContent);
+
+    const prettyRes = formatExternalMcpToolResult({
+      content: [{ type: 'text', text: pretty }],
+      structuredContent,
+    });
+    expect(prettyRes.text).toBe(pretty);
+    expect(prettyRes.text).not.toContain('structuredContent:');
+    expect(prettyRes.structuredContent).toEqual(structuredContent);
+  });
+
+  it('ignores non-object structuredContent when content has text, matching asStructuredContent', () => {
+    for (const nonObj of [null, [1, 2], 'str', 42] as const) {
+      const result = formatExternalMcpToolResult({
+        content: [{ type: 'text', text: 'plain summary' }],
+        structuredContent: nonObj,
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe('plain summary');
+      expect(result.structuredContent).toBeUndefined();
+      expect('structuredContent' in result).toBe(false);
+    }
+  });
+
+  it('does not throw on unserializable circular structuredContent and preserves content text', () => {
+    const circular: Record<string, unknown> = { id: 'cyc-1' };
+    circular.self = circular;
+
+    const result = formatExternalMcpToolResult({
+      content: [{ type: 'text', text: 'safe summary' }],
+      structuredContent: circular,
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toBe('safe summary');
+    expect(result.structuredContent).toBe(circular);
+  });
+
+  it('preserves isError: true while still appending structuredContent when content has text', () => {
+    const structuredContent = { code: 'QUOTA_EXCEEDED', retryAfterSeconds: 30 };
+    const result = formatExternalMcpToolResult({
+      content: [{ type: 'text', text: 'Upload rejected: quota exceeded' }],
+      structuredContent,
+      isError: true,
+    });
+
+    expect(result).toEqual({
+      isError: true,
+      text: `Upload rejected: quota exceeded\n\nstructuredContent:\n${JSON.stringify(structuredContent)}`,
+      structuredContent,
+    });
+  });
+
+  it('returns { isError: false, text } with structuredContent key absent when structuredContent is omitted', () => {
+    const result = formatExternalMcpToolResult({
+      content: [{ type: 'text', text: 'plain' }],
+    });
+    expect(result).toEqual({ isError: false, text: 'plain' });
+    expect('structuredContent' in result).toBe(false);
+  });
+});
+
 // ── 2. External Streamable HTTP / SSE MCP Server ───────────────────────────
 
 describe('External HTTP & SSE MCP server fallback', () => {
@@ -386,6 +568,25 @@ describe('External HTTP & SSE MCP server fallback', () => {
               sendReply({
                 content: [],
                 structuredContent: { ok: true, count: 3 },
+                isError: false,
+              });
+              return;
+            }
+            if (body.params?.name === 'prepare_doc_image_upload') {
+              sendReply({
+                content: [{
+                  type: 'text',
+                  text: '**Private Docs image upload prepared**\nID: img-42\nPathname: docs/ws-1/img-42.png',
+                }],
+                structuredContent: {
+                  imageId: 'img-42',
+                  pathname: 'docs/ws-1/img-42.png',
+                  clientToken: 'test-client-token-doc-img-42',
+                  expiresAt: '2026-11-15T23:59:00.000Z',
+                  url: '/api/docs/images/img-42',
+                  markdown: '![shot.png](/api/docs/images/img-42)',
+                },
+                _meta: { internalOnly: 'never-leak' },
                 isError: false,
               });
               return;
@@ -557,6 +758,19 @@ describe('External HTTP & SSE MCP server fallback', () => {
         content: [{ type: 'text', text: '{"ok":true,"count":3}' }],
         isError: false,
       });
+
+      const docImgUploadRes = await postJson(bridge.url, bridge.headers, {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'tools/call',
+        params: { name: 'call_mcp_tool', arguments: { server: 'compass', tool: 'prepare_doc_image_upload', argsJson: '{}' } },
+      });
+      const docImgPayload = JSON.parse(docImgUploadRes.body).result;
+      expect(docImgPayload.isError).toBe(false);
+      expect(docImgPayload.content[0].text).toContain('**Private Docs image upload prepared**\nID: img-42\nPathname: docs/ws-1/img-42.png');
+      expect(docImgPayload.content[0].text).toContain('\n\nstructuredContent:\n');
+      expect(docImgPayload.content[0].text).toContain('test-client-token-doc-img-42');
+      expect(docImgPayload.content[0].text).not.toContain('never-leak');
     },
   );
 
@@ -795,18 +1009,27 @@ rl.on('line', (line) => {
   } else if (msg.method === 'tools/list') {
     reply({ tools: [{ name: 'inspect_env', description: 'Inspect env and cwd' }] });
   } else if (msg.method === 'tools/call') {
-    reply({
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          cwd: fs.realpathSync(process.cwd()),
-          sessionVar: process.env.SESSION_VAR,
-          serverVar: process.env.SERVER_VAR,
-          args: msg.params?.arguments ?? {},
-        }),
-      }],
-      isError: false,
-    });
+    if (msg.params?.name === 'prepare_upload') {
+      reply({
+        content: [{ type: 'text', text: 'Stdio upload prepared for up-9' }],
+        structuredContent: { uploadId: 'up-9', clientToken: 'test-client-token-stdio-9' },
+        _meta: { stdioSecret: 'never-leak-stdio' },
+        isError: false,
+      });
+    } else {
+      reply({
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            cwd: fs.realpathSync(process.cwd()),
+            sessionVar: process.env.SESSION_VAR,
+            serverVar: process.env.SERVER_VAR,
+            args: msg.params?.arguments ?? {},
+          }),
+        }],
+        isError: false,
+      });
+    }
   }
 });
 setInterval(() => {}, 1000);
@@ -861,6 +1084,19 @@ setInterval(() => {}, 1000);
       serverVar: 'from-server',
       args: { hello: 'world' },
     });
+
+    const uploadRes = await postJson(bridge.url, bridge.headers, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'call_mcp_tool', arguments: { server: 'localstdio', tool: 'prepare_upload', argsJson: '{}' } },
+    });
+    const uploadResult = JSON.parse(uploadRes.body).result;
+    expect(uploadResult.isError).toBe(false);
+    expect(uploadResult.content[0].text).toBe(
+      'Stdio upload prepared for up-9\n\nstructuredContent:\n{"uploadId":"up-9","clientToken":"test-client-token-stdio-9"}',
+    );
+    expect(uploadResult.content[0].text).not.toContain('never-leak-stdio');
 
     const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
     expect(pid).toBeGreaterThan(0);

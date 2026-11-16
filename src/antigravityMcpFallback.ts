@@ -55,6 +55,7 @@ export interface ExternalMcpToolSummary {
 export interface ExternalMcpCallResult {
   isError: boolean;
   text: string;
+  structuredContent?: Record<string, unknown>;
 }
 
 export interface ExternalMcpPoolOptions {
@@ -150,7 +151,15 @@ function formatImagePlaceholder(item: Record<string, unknown>): string {
 
 /**
  * Flatten an MCP `tools/call` result into text, converting base64 image blocks into compact placeholders (matching
- * `ObsidianTools.ts`) and falling back to `structuredContent` when `content` yields no text.
+ * `ObsidianTools.ts`).
+ *
+ * `agy acp` feeds ONLY `CallToolResult.content` text blocks to the model — never `CallToolResult.structuredContent` or
+ * `_meta`. Tools such as Compass's upload preparers return a human-readable summary in `content` while placing
+ * machine-only fields (`clientToken`, `receipt`) exclusively inside object `structuredContent`. We therefore serialize
+ * plain-object `structuredContent` into `text` even when `content` is non-empty (skipping duplicate output when
+ * `content` already equals the compact or pretty-printed JSON of `structuredContent`, and ignoring non-object
+ * `structuredContent` when `content` is non-empty, matching `asStructuredContent` in `src/protocol/hostTools.ts`).
+ * `_meta` is never forwarded.
  */
 export function formatExternalMcpToolResult(res: unknown): ExternalMcpCallResult {
   const obj = isPlainObject(res) ? res : {};
@@ -164,10 +173,36 @@ export function formatExternalMcpToolResult(res: unknown): ExternalMcpCallResult
       return JSON.stringify(raw);
     })
     .join('\n');
-  if (!text && obj.structuredContent !== undefined) {
-    text = JSON.stringify(obj.structuredContent);
+  const structuredContent = isPlainObject(obj.structuredContent) ? obj.structuredContent : undefined;
+  const trimmed = text.trim();
+  if (structuredContent !== undefined) {
+    try {
+      const serialized = JSON.stringify(structuredContent);
+      if (typeof serialized === 'string') {
+        if (!trimmed) {
+          text = serialized;
+        } else if (
+          trimmed !== serialized
+          && !(trimmed.startsWith('{') && trimmed === JSON.stringify(structuredContent, null, 2))
+        ) {
+          text = `${text}\n\nstructuredContent:\n${serialized}`;
+        }
+      }
+    } catch {
+      // Unserializable structuredContent: preserve `content` text without throwing.
+    }
+  } else if (!trimmed && obj.structuredContent !== undefined && obj.structuredContent !== null) {
+    try {
+      text = JSON.stringify(obj.structuredContent) ?? text;
+    } catch {
+      // Ignore unserializable fallback payloads.
+    }
   }
-  return { isError, text };
+  return {
+    isError,
+    text,
+    ...(structuredContent !== undefined ? { structuredContent } : {}),
+  };
 }
 
 /** Extract joined `data:` payload from one SSE event block (`\n\n`-delimited). */
