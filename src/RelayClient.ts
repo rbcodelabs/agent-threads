@@ -384,6 +384,7 @@ export class RelayClient {
         break;
 
       case 'send_message':
+        this.threadManager.dismissDecisions?.(cmd.threadId);
         this.threadManager.sendMessage(cmd.threadId, cmd.text, cmd.images).catch((err) => {
           console.error('[RelayClient] send_message error:', err);
         });

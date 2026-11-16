@@ -591,3 +591,30 @@ describe('N4 wording', () => {
     expect(text).toBe('Orchestrator errored — Claude process exited unexpectedly\u00a0(code\u00a01)');
   });
 });
+
+describe('decision dismissal on manual submit', () => {
+  it('dismisses pending decisions on the active orchestrator thread before sending', async () => {
+    const t = setup();
+    const dismissDecisions = vi.fn(() => {
+      t.calls.push('dismiss:orch');
+      return true;
+    });
+    const saveSettings = vi.fn(async () => {});
+    (t.manager as Record<string, unknown>).dismissDecisions = dismissDecisions;
+    t.deps.permissionCard = {
+      getSettings: () => ({}) as never,
+      saveSettings,
+      hostExecAllowAlways: () => false,
+    };
+
+    const el = input(t.host);
+    el.value = 'Prioritize auth fixes';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    press(el, 'Enter');
+
+    await vi.waitFor(() => expect(t.manager.sendMessage).toHaveBeenCalledWith('orch', 'Prioritize auth fixes'));
+    expect(dismissDecisions).toHaveBeenCalledWith('orch');
+    expect(saveSettings).toHaveBeenCalledTimes(1);
+    expect(t.calls).toEqual(['dismiss:orch', 'send:orch:Prioritize auth fixes']);
+  });
+});

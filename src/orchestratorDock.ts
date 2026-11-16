@@ -56,7 +56,8 @@ export interface OrchestratorDockDeps {
   manager: Pick<ThreadManager,
     'getThread' | 'isRunning' | 'hasPendingPermission' | 'hasPendingQuestion' | 'hasPendingPlan'
     | 'hasActiveBackgroundTasks' | 'sendMessage' | 'subscribe' | 'interrupt' | 'getQueuedMessages'
-    | 'removeQueuedMessageAt' | 'getThreadActivity' | 'getPendingPermission' | 'resolvePermission' | 'getRemoteScope'>;
+    | 'removeQueuedMessageAt' | 'getThreadActivity' | 'getPendingPermission' | 'resolvePermission' | 'getRemoteScope'>
+    & { dismissDecisions?: (threadId: string) => boolean };
   /** Board threads (the host applies its own filter, e.g. isKanbanThread): the source of total/running/attention. */
   listThreads(): Thread[];
   hasPendingWakeup(threadId: string): boolean;
@@ -1333,6 +1334,9 @@ export class OrchestratorDock {
     if (this.inputEl) { this.inputEl.value = ''; this.autosize(this.inputEl); }
     this.openSheet();
     try {
+      if (this.deps.manager.dismissDecisions?.(id)) {
+        void this.deps.permissionCard?.saveSettings();
+      }
       await this.deps.manager.sendMessage(id, text);
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);

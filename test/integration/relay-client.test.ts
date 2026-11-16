@@ -379,6 +379,51 @@ describe('RelayClient — send_message round-trip', () => {
     desktopClient.disconnect();
     mobileClient.disconnect();
   });
+
+  it('send_message from mobile dismisses pending decisions on the target thread before sending', async () => {
+    const { desktopWs, mobileWs } = createSocketPair();
+    let desktopWsCreated = false;
+
+    const cleanup = installMockWebSocket(() => {
+      if (!desktopWsCreated) {
+        desktopWsCreated = true;
+        Promise.resolve().then(() => desktopWs.triggerOpen());
+        return desktopWs;
+      }
+      Promise.resolve().then(() => mobileWs.triggerOpen());
+      return mobileWs;
+    });
+
+    const manager = makeManager();
+    const sendMessageSpy = vi.spyOn(manager, 'sendMessage').mockResolvedValue(undefined);
+    const dismissSpy = vi.spyOn(manager, 'dismissDecisions');
+    const orch = manager.createThread('Orchestrator', '/cwd');
+    const target = manager.createThread('Target', '/cwd');
+    manager.postDecision(target.id, orch.id, {
+      question: 'Ship mobile patch?',
+      options: [{ label: 'Yes', description: '' }, { label: 'No', description: '' }],
+    });
+    expect(manager.getThread(target.id)?.pendingDecisions).toHaveLength(1);
+
+    const desktopClient = new RelayClient('desktop', 'ws://mock', 'room-1', manager);
+    desktopClient.connect();
+    await drain(5);
+
+    const mobileClient = new RelayClient('mobile', 'ws://mock', 'room-1');
+    mobileClient.connect();
+    await drain(5);
+
+    mobileClient.sendCommand({ type: 'send_message', threadId: target.id, text: 'Manual reply from phone' });
+    await drain(10);
+
+    expect(dismissSpy).toHaveBeenCalledWith(target.id);
+    expect(manager.getThread(target.id)?.pendingDecisions).toBeUndefined();
+    expect(sendMessageSpy).toHaveBeenCalledWith(target.id, 'Manual reply from phone', undefined);
+
+    cleanup();
+    desktopClient.disconnect();
+    mobileClient.disconnect();
+  });
 });
 
 describe('RelayClient — question request/resolution bridge', () => {

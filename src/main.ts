@@ -1303,9 +1303,13 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
     this.register(unsubCwdRepair);
 
-    // Persist pending plan text so the plan card survives a reload/crash.
+    // Persist pending plan text and orchestrator decision updates so cards survive a reload/crash.
     const unsubPendingPlan = this.manager.subscribe((_threadId, event) => {
-      if (event.type === 'pending_plan_changed' || event.type === 'permission_mode_changed') {
+      if (
+        event.type === 'pending_plan_changed' ||
+        event.type === 'permission_mode_changed' ||
+        event.type === 'pending_decisions_changed'
+      ) {
         this.saveSettings().catch(console.error);
       }
     });

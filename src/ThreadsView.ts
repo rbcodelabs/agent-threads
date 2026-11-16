@@ -29,7 +29,8 @@ import { isSetAsGoalEligible } from './goalContext';
 import { isRetryEligible } from './retryMessage';
 import { buildComparePrUrl, gitDiffBarVisible, prButtonLabel, prUrlMatchesRepo } from './gitDiffUtils';
 import type { Thread, ChatMessage, ToolCallRecord, AskQuestion, ImageAttachment } from './types';
-import { renderQuestionFields } from './QuestionForm';
+import { renderQuestionFields, type QuestionDraft } from './QuestionForm';
+import { decisionToQuestion } from './decisions';
 import { approveProposedReply, discardProposedReply, takeProposedReplyForEdit } from './proposedReplyActions';
 import { sendRestoredQuestionAnswer } from './questionActions';
 import { proposedReplyDeps, questionAnswerDeps } from './managerActionDeps';
@@ -433,6 +434,7 @@ export class ThreadsView extends ItemView {
   private managerNotesToggleEl: HTMLElement | null = null;
   private managerNotesPanelEl: HTMLElement | null = null;
   private managerNotesCollapsed = true;
+  private decisionDrafts = new Map<string, QuestionDraft>();
 
   // Ordered list for the footer permission-mode picker menu.
   // `value: undefined` means "use the global default" (clears the per-thread override).
@@ -635,12 +637,24 @@ export class ThreadsView extends ItemView {
       if (event.type === 'thread_created' || event.type === 'thread_deleted') {
         this.renderProjectBar();
       }
-      // Drop remembered scroll offsets for a thread that no longer exists.
+      // Drop remembered scroll offsets and decision drafts for a thread that no longer exists.
       if (event.type === 'thread_deleted') {
         for (const key of [...this.agentScroll.keys()]) {
           if (key.startsWith(`${threadId}:`)) this.agentScroll.delete(key);
         }
+        for (const key of [...this.decisionDrafts.keys()]) {
+          if (key.startsWith(`${threadId}:d:`)) this.decisionDrafts.delete(key);
+        }
         this.streamingBuffers.delete(threadId);
+      }
+      if (event.type === 'pending_decisions_changed') {
+        const liveIds = new Set((this.manager.getThread(threadId)?.pendingDecisions ?? []).map((d) => d.id));
+        const prefix = `${threadId}:d:`;
+        for (const key of [...this.decisionDrafts.keys()]) {
+          if (key.startsWith(prefix) && !liveIds.has(key.slice(prefix.length))) {
+            this.decisionDrafts.delete(key);
+          }
+        }
       }
       // Maintain a per-thread streaming buffer for ALL threads so we can restore
       // the live streaming UI when switching back to a thread still in progress.
@@ -869,6 +883,12 @@ export class ThreadsView extends ItemView {
       }
     }
     if (event.type === 'thread_deleted') this.repairSelectionAfterDelete(threadId);
+    if (
+      (event.type === 'summary_updated' || event.type === 'thread_deleted') &&
+      this.messagesEl?.querySelector(':scope > .ct-decision-cards')
+    ) {
+      this.renderDecisionCards();
+    }
   }
 
   /**
@@ -1755,8 +1775,9 @@ export class ThreadsView extends ItemView {
     this.applyComposerPlaceholder();
     this.restorePendingPlanCard();
     this.restorePendingQuestionCard();
-    // renderMessages() just wiped messagesEl, so re-anchor a proposed reply
-    // that was set on this thread while it was in the background.
+    // renderMessages() just wiped messagesEl, so re-anchor orchestrator decision
+    // cards and any proposed reply set on this thread while in the background.
+    this.renderDecisionCards();
     this.renderProposedReplyCard();
     this.syncEditedFiles();
     this.refreshLeafHeader();
@@ -2548,8 +2569,9 @@ export class ThreadsView extends ItemView {
     this.renderManagerNotesPanel();
     // Runs before renderMessages() in setActiveThread()'s call path, so its
     // work gets wiped by messagesEl.empty() there — harmless given the
-    // idempotency guard in renderProposedReplyCard, and still needed for the
-    // other call sites of renderThreadInfo() that aren't preceded by a wipe.
+    // idempotency guards, and still needed for the other call sites of
+    // renderThreadInfo() that aren't preceded by a wipe.
+    this.renderDecisionCards();
     this.renderProposedReplyCard();
   }
 
@@ -2761,6 +2783,158 @@ export class ThreadsView extends ItemView {
    * a no-op — otherwise every one of those unrelated refreshes would rebuild
    * the card and yank the scroll position.
    */
+  private decisionDraftFor(key: string): QuestionDraft {
+    let d = this.decisionDrafts.get(key);
+    if (!d) {
+      d = { fields: {} };
+      this.decisionDrafts.set(key, d);
+    }
+    return d;
+  }
+
+  /**
+   * Keeps trailing orchestrator cards (`.ct-decision-cards`, `.ct-proposed-reply-card`)
+   * pinned below newly appended messages or streaming rows without blurring an
+   * input the user is actively typing into.
+   */
+  private keepTrailingCardsAtBottom(): void {
+    if (!this.messagesEl) return;
+    const ae = document.activeElement;
+    const trailing = [
+      this.messagesEl.querySelector<HTMLElement>(':scope > .ct-decision-cards'),
+      this.messagesEl.querySelector<HTMLElement>(':scope > .ct-proposed-reply-card'),
+    ].filter((el): el is HTMLElement => el !== null);
+    if (trailing.length === 0) return;
+
+    const children = this.messagesEl.children;
+    const alreadyAtEnd =
+      children.length >= trailing.length &&
+      trailing.every((el, idx) => children[children.length - trailing.length + idx] === el);
+    if (alreadyAtEnd) return;
+
+    for (const el of trailing) {
+      if (ae && el.contains(ae)) continue;
+      this.messagesEl.appendChild(el);
+    }
+  }
+
+  /**
+   * Syncs inline orchestrator decision cards in `this.messagesEl` with
+   * `thread.pendingDecisions` without rebuilding already-mounted cards (so
+   * live inputs and focus survive sibling updates) and removes `.ct-decision-cards`
+   * completely when empty so normal threads have zero extra DOM nodes or flex gaps.
+   */
+  private renderDecisionCards(): void {
+    const threadId = this.activeThreadId;
+    const thread = threadId ? this.manager.getThread(threadId) : null;
+    const decisions = thread?.pendingDecisions ?? [];
+
+    if (threadId && thread) {
+      const wantedIds = new Set(decisions.map((d) => d.id));
+      const prefix = `${threadId}:d:`;
+      for (const key of [...this.decisionDrafts.keys()]) {
+        if (key.startsWith(prefix) && !wantedIds.has(key.slice(prefix.length))) {
+          this.decisionDrafts.delete(key);
+        }
+      }
+    }
+
+    let container = this.messagesEl?.querySelector<HTMLElement>(':scope > .ct-decision-cards') ?? null;
+    if (
+      !this.messagesEl ||
+      this.newConv ||
+      this.messagesEl.classList.contains('ct-messages-agent-view') ||
+      !threadId ||
+      !thread ||
+      decisions.length === 0
+    ) {
+      container?.remove();
+      return;
+    }
+
+    if (!container) {
+      container = this.messagesEl.createDiv('ct-decision-cards');
+      const proposedCard = this.messagesEl.querySelector<HTMLElement>(':scope > .ct-proposed-reply-card');
+      if (proposedCard) {
+        this.messagesEl.insertBefore(container, proposedCard);
+      }
+      const mountedContainer = container;
+      mountedContainer.addEventListener('focusout', () => {
+        queueMicrotask(() => {
+          if (mountedContainer.isConnected && !mountedContainer.contains(document.activeElement)) {
+            this.keepTrailingCardsAtBottom();
+          }
+        });
+      });
+    }
+
+    const wanted = new Set(decisions.map((d) => d.id));
+    container.querySelectorAll<HTMLElement>(':scope > [data-decision-id]').forEach((el) => {
+      if (!wanted.has(el.dataset.decisionId ?? '')) el.remove();
+    });
+
+    const existingById = new Map<string, HTMLElement>();
+    container.querySelectorAll<HTMLElement>(':scope > [data-decision-id]').forEach((el) => {
+      if (el.dataset.decisionId) existingById.set(el.dataset.decisionId, el);
+    });
+
+    let added = 0;
+    for (const decision of decisions) {
+      const from = this.manager.getThread(decision.sourceThreadId)?.title;
+      const labelText = from ? `Decision for you · ${from}` : 'Decision for you';
+      const existingCard = existingById.get(decision.id);
+      if (existingCard) {
+        const labelEl = existingCard.querySelector<HTMLElement>('.ct-decision-card-label');
+        if (labelEl && labelEl.textContent !== labelText) {
+          labelEl.textContent = labelText;
+        }
+        continue;
+      }
+
+      added++;
+      const card = container.createDiv('ct-decision-card');
+      card.dataset.decisionId = decision.id;
+
+      const header = card.createDiv('ct-decision-card-header');
+      const iconEl = header.createSpan('ct-decision-card-icon');
+      setIcon(iconEl, 'git-fork');
+      header.createSpan({ cls: 'ct-decision-card-label', text: labelText });
+
+      const body = card.createDiv('ct-decision-card-body');
+      const draftKey = `${threadId}:d:${decision.id}`;
+      const collect = renderQuestionFields(body, [decisionToQuestion(decision)], undefined, this.decisionDraftFor(draftKey));
+
+      const actions = card.createDiv('ct-decision-card-actions');
+      const submitBtn = actions.createEl('button', {
+        cls: 'ct-decision-card-submit',
+        text: 'Send answer',
+        attr: { type: 'button' },
+      });
+      submitBtn.addEventListener('click', async () => {
+        const answer = collect()[decision.id] ?? '';
+        if (!answer.trim()) {
+          new Notice('Choose an option or type an answer first.');
+          return;
+        }
+        submitBtn.disabled = true;
+        try {
+          await this.manager.answerDecision(threadId, decision.id, answer);
+          this.decisionDrafts.delete(draftKey);
+          void this.plugin.saveSettings();
+        } catch (err) {
+          submitBtn.disabled = false;
+          console.error('[claude-threads] failed to deliver decision answer:', err);
+          new Notice(err instanceof Error ? err.message : 'Could not deliver the answer.');
+        }
+      });
+    }
+
+    if (added > 0) {
+      this.keepTrailingCardsAtBottom();
+      this.scrollToBottom();
+    }
+  }
+
   private renderProposedReplyCard(): void {
     const threadId = this.activeThreadId;
     const thread = threadId ? this.manager.getThread(threadId) : null;
@@ -3615,6 +3789,7 @@ export class ThreadsView extends ItemView {
     // Fresh streamingEl — any previous tools wrapper is gone with it (or about
     // to be replayed via renderLiveToolCalls if buf.tools carries anything over).
     this.streamingToolsEl = null;
+    this.keepTrailingCardsAtBottom();
   }
 
   private renderThinkingPreview(text: string): void {
@@ -4135,6 +4310,8 @@ export class ThreadsView extends ItemView {
     this.manager.clearSelectedAgentRun(this.activeThreadId);
     this.pendingMainScroll = this.agentScroll.get(`${this.activeThreadId}:main`) ?? null;
     await this.renderMessages();
+    this.renderDecisionCards();
+    this.renderProposedReplyCard();
     this.applyComposerPlaceholder();
   }
 
@@ -4251,6 +4428,7 @@ export class ThreadsView extends ItemView {
         assistantBody: this.compressedView ? (content, message) => this.renderCompressedAssistantBody(content, message) : undefined,
       },
     });
+    this.keepTrailingCardsAtBottom();
     await rendered.done;
     return msg.role === 'compact' || msg.role === 'notice' ? null : rendered.el;
   }
@@ -5070,6 +5248,7 @@ export class ThreadsView extends ItemView {
       }
     }
 
+    this.keepTrailingCardsAtBottom();
     this.scrollToBottom();
   }
 
@@ -5160,6 +5339,7 @@ export class ThreadsView extends ItemView {
       account.createDiv({ cls: 'ct-usage-muted', text: 'No account activity was returned.' });
     }
     card.createDiv({ cls: 'ct-usage-freshness', text: `Updated ${new Date(usage.updatedAt).toLocaleTimeString()}` });
+    this.keepTrailingCardsAtBottom();
     this.scrollToBottom();
   }
 
@@ -5233,6 +5413,11 @@ export class ThreadsView extends ItemView {
         break;
       }
 
+      case 'pending_decisions_changed': {
+        this.renderDecisionCards();
+        break;
+      }
+
       case 'run_state_settled': {
         // The session generation has fully unwound and isRunning() has reached
         // its final settled value — re-check banners that gate on isRunning()
@@ -5273,6 +5458,7 @@ export class ThreadsView extends ItemView {
               thumb.title = img.name;
             }
           }
+          this.keepTrailingCardsAtBottom();
           this.scrollToBottom();
         }
         // The composer creates its optimistic bubble before ThreadManager has
@@ -5467,6 +5653,7 @@ export class ThreadsView extends ItemView {
             thumb.title = img.name;
           }
         }
+        this.keepTrailingCardsAtBottom();
         this.scrollToBottom();
         break;
       }
@@ -5480,6 +5667,7 @@ export class ThreadsView extends ItemView {
           this.clearStreamingState();
         }
         this.resetActiveTaskDomState();
+        this.keepTrailingCardsAtBottom();
         // Message completed normally — discard the saved sent text so it can't
         // bleed into another thread if the user later stops a different thread.
         if (this.activeThreadId) this.lastSentTexts.delete(this.activeThreadId);
@@ -6016,6 +6204,7 @@ export class ThreadsView extends ItemView {
           text: 'Connection interrupted — automatically reconnecting…',
           cls: 'ct-reconnecting-text',
         });
+        this.keepTrailingCardsAtBottom();
         this.scrollToBottom();
         break;
       }
@@ -6037,6 +6226,7 @@ export class ThreadsView extends ItemView {
           text: `Rate limited by the API — retrying in ${Math.round(event.delayMs / 1000)}s (attempt ${event.attempt}/${event.maxRetries})…`,
           cls: 'ct-reconnecting-text',
         });
+        this.keepTrailingCardsAtBottom();
         this.scrollToBottom();
         break;
       }
@@ -6055,6 +6245,7 @@ export class ThreadsView extends ItemView {
           text: 'Claude sign-in needs refreshing — restarting the session and retrying…',
           cls: 'ct-reconnecting-text',
         });
+        this.keepTrailingCardsAtBottom();
         this.scrollToBottom();
         break;
       }
@@ -6069,6 +6260,7 @@ export class ThreadsView extends ItemView {
         }
         if (isSignInExpiredError(event.error.message) && this.activeThreadId) {
           this.renderClaudeSignInCard(this.activeThreadId, event.error.message);
+          this.keepTrailingCardsAtBottom();
           this.setRunningState(false);
           break;
         }
@@ -6090,6 +6282,7 @@ export class ThreadsView extends ItemView {
         if (isAwsSsoError(event.error.message)) {
           renderAwsReauthButton(errEl, this.plugin.settings, event.error.message);
         }
+        this.keepTrailingCardsAtBottom();
         this.setRunningState(false);
         this.scrollToBottom();
         break;
@@ -6535,6 +6728,7 @@ export class ThreadsView extends ItemView {
       const divider = this.messagesEl.createDiv('ct-compact-divider');
       divider.createSpan({ cls: 'ct-compact-label', text });
     }
+    this.keepTrailingCardsAtBottom();
     this.scrollToBottom();
   }
 
@@ -6559,6 +6753,7 @@ export class ThreadsView extends ItemView {
       return;
     }
 
+    this.dismissPendingDecisionsForManualSend(threadId);
     await this.applyThreadGoal(threadId, arg);
     if (this.activeThreadId === threadId) this.showCommandDivider(`Goal set: ${arg}`);
   }
@@ -6698,6 +6893,7 @@ export class ThreadsView extends ItemView {
     this.showCommandDivider(draft ? 'Creating draft PR…' : 'Creating PR…');
 
     const sendThreadId = this.activeThreadId;
+    this.dismissPendingDecisionsForManualSend(sendThreadId);
     this.manager
       .sendMessage(sendThreadId, resolveCreatePrMessage(this.plugin.settings, draft))
       .catch((err) => {
@@ -6752,6 +6948,8 @@ export class ThreadsView extends ItemView {
       return;
     }
 
+    this.dismissPendingDecisionsForManualSend(threadId);
+
     // Replace, not stack: a thread can only have one active loop. Delete any
     // existing loop(s) targeting this thread before creating the new one.
     const existing = loopsForThread();
@@ -6783,6 +6981,12 @@ export class ThreadsView extends ItemView {
     });
   }
 
+  private dismissPendingDecisionsForManualSend(threadId: string): void {
+    if (this.manager.dismissDecisions(threadId)) {
+      void this.plugin.saveSettings();
+    }
+  }
+
   private async handleSendFromDispatch(
     typed: string,
     images: ImageAttachment[],
@@ -6805,6 +7009,7 @@ export class ThreadsView extends ItemView {
       if (!this.manager.getThread(commandThreadId)) return;
       this.lastSentTexts.set(commandThreadId, typed);
       if (captured) delete captured.draft;
+      this.dismissPendingDecisionsForManualSend(commandThreadId);
       if (this.activeThreadId === commandThreadId) this.hideSummaryBanner(false);
       const report = (message: string, isError = false) => {
         if (!this.manager.getThread(commandThreadId)) return;
@@ -6959,6 +7164,7 @@ export class ThreadsView extends ItemView {
     if (pendingQuestions && this.manager.hasPendingQuestion(this.activeThreadId)) {
       const answer = text || (images.length > 0 ? '[See attached image]' : '');
       const answers = Object.fromEntries(pendingQuestions.map(q => [q.question, answer]));
+      this.dismissPendingDecisionsForManualSend(this.activeThreadId);
       this.manager.resolveQuestion(this.activeThreadId, answers);
       return;
     }
@@ -6996,6 +7202,7 @@ export class ThreadsView extends ItemView {
         const current = currentThread?.model ?? 'default';
         const infoEl = this.messagesEl.createDiv('ct-compact-divider');
         infoEl.createSpan({ cls: 'ct-compact-label', text: `Model: ${current}` });
+        this.keepTrailingCardsAtBottom();
         this.scrollToBottom();
         return;
       }
@@ -7011,12 +7218,14 @@ export class ThreadsView extends ItemView {
         const errEl = this.messagesEl.createDiv('ct-message ct-error');
         const available = this.plugin.discoveredModelsByHarness[harness].map((model) => model.value).join(', ') || `the ${harnessName} default (start a ${harnessName} thread to load its catalog)`;
         errEl.createEl('p', { text: `Unknown ${harnessName} model "${arg}". Available: ${available}` });
+        this.keepTrailingCardsAtBottom();
         this.scrollToBottom();
         return;
       }
       if (!isCodex && !(arg in MODEL_ALIASES)) {
         const errEl = this.messagesEl.createDiv('ct-message ct-error');
         errEl.createEl('p', { text: `Unknown model "${arg}". Use: fable, opus, sonnet, haiku, default` });
+        this.keepTrailingCardsAtBottom();
         this.scrollToBottom();
         return;
       }
@@ -7027,6 +7236,7 @@ export class ThreadsView extends ItemView {
       const divider = this.messagesEl.createDiv('ct-compact-divider');
       divider.createSpan({ cls: 'ct-compact-label', text: label });
       this.renderThreadInfo();
+      this.keepTrailingCardsAtBottom();
       this.scrollToBottom();
       return;
     }
@@ -7038,6 +7248,7 @@ export class ThreadsView extends ItemView {
     // (streaming_start → setRunningState(true), done/error → setRunningState(false))
     // so there is nothing useful the await was providing.
     const sendThreadId = this.activeThreadId;
+    this.dismissPendingDecisionsForManualSend(sendThreadId);
     this.manager.sendMessage(sendThreadId, text || ' ', images.length > 0 ? images : undefined)
       .catch(err => {
         const errEl = this.messagesEl.createDiv('ct-message ct-error');

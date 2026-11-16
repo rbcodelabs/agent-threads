@@ -81,6 +81,16 @@ export function removeDecision(thread: DecisionHolder, decisionId: string): Pend
   return found;
 }
 
+/** Clears every pending decision on `thread` (used when Rick manually messages the thread). */
+export function clearAllDecisions(thread: DecisionHolder): boolean {
+  if (!thread.pendingDecisions || thread.pendingDecisions.length === 0) {
+    delete thread.pendingDecisions;
+    return false;
+  }
+  delete thread.pendingDecisions;
+  return true;
+}
+
 /** Renders a decision as the AskQuestion the shared QuestionForm understands (id = decision id). */
 export function decisionToQuestion(decision: PendingDecision): AskQuestion {
   return {
