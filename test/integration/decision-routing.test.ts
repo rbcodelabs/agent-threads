@@ -6,7 +6,19 @@ import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_SETTINGS } from '../../src/types';
 import type { ThreadEvent } from '../../src/ThreadManager';
 
-vi.mock('../../src/ThreadSession', () => ({ ThreadSession: class {} }));
+vi.mock('../../src/ThreadSession', () => ({
+  ThreadSession: class {
+    turnInFlight = false;
+    async start(): Promise<void> {}
+    send(): void { this.turnInFlight = true; }
+    async interrupt(): Promise<void> {}
+    async setModel(): Promise<void> {}
+    async setPermissionMode(): Promise<void> {}
+    async restart(): Promise<void> {}
+    close(): void {}
+    async getContextUsage(): Promise<null> { return null; }
+  },
+}));
 
 const { ThreadManager } = await import('../../src/ThreadManager');
 
@@ -70,6 +82,49 @@ describe('decision answer routing', () => {
     manager.clearDecision(subject.id, orchestrator.id, d.id);
     await manager.answerDecision(subject.id, d.id, 'Ship');
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it('dismissDecisions clears all pending decisions and emits pending_decisions_changed only when non-empty', () => {
+    const { manager, orchestrator, subject, events } = setup();
+    const other = manager.createThread('Second orchestrator', '/tmp');
+
+    expect(manager.dismissDecisions('unknown-thread')).toBe(false);
+    expect(manager.dismissDecisions(subject.id)).toBe(false);
+    expect(events).toEqual([]);
+
+    manager.postDecision(subject.id, orchestrator.id, { question: 'Ship?', options: OPTIONS });
+    manager.postDecision(subject.id, other.id, { question: 'Target env?', options: OPTIONS });
+    events.length = 0;
+
+    expect(manager.dismissDecisions(subject.id)).toBe(true);
+    expect(manager.getThread(subject.id)!.pendingDecisions).toBeUndefined();
+    expect(events).toEqual([[subject.id, 'pending_decisions_changed']]);
+
+    events.length = 0;
+    expect(manager.dismissDecisions(subject.id)).toBe(false);
+    expect(events).toEqual([]);
+  });
+
+  it('automated sendMessage and answerDecision do NOT clear pending decisions on target or orchestrator threads', async () => {
+    const manager = new ThreadManager({ ...DEFAULT_SETTINGS });
+    const orchestrator = manager.createThread('Orchestrator', '/tmp');
+    const worker = manager.createThread('Worker', '/tmp');
+    const subject = manager.createThread('Subject', '/tmp');
+
+    const orchDecision = manager.postDecision(orchestrator.id, orchestrator.id, { question: 'Portfolio priority?', options: OPTIONS });
+    const subjectDecision = manager.postDecision(subject.id, orchestrator.id, { question: 'Keep feature flag?', options: OPTIONS });
+    const workerDecision = manager.postDecision(worker.id, orchestrator.id, { question: 'Ship worker PR?', options: OPTIONS });
+
+    // Direct/automated ThreadManager.sendMessage on `subject` must preserve its pending decisions.
+    await manager.sendMessage(subject.id, 'Automated heartbeat check');
+    expect(manager.getThread(subject.id)!.pendingDecisions).toEqual([subjectDecision]);
+
+    // Answering `worker`'s decision sends a user message to `orchestrator` via sendMessage;
+    // `orchestrator`'s own pending decision (and `subject`'s) must remain untouched.
+    await manager.answerDecision(worker.id, workerDecision.id, 'Ship');
+    expect(manager.getThread(worker.id)!.pendingDecisions).toBeUndefined();
+    expect(manager.getThread(orchestrator.id)!.pendingDecisions).toEqual([orchDecision]);
+    expect(manager.getThread(subject.id)!.pendingDecisions).toEqual([subjectDecision]);
   });
 });
 

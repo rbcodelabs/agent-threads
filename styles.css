@@ -4435,6 +4435,138 @@
   color: var(--color-red, #e05252);
 }
 
+/* -- Inline orchestrator decision cards ------------------------------- */
+.ct-decision-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ct-messages:has(.ct-decision-cards) > .ct-empty {
+  flex: 1;
+  height: auto;
+}
+
+.ct-decision-card {
+  background: color-mix(in srgb, var(--interactive-accent) 8%, var(--background-primary));
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 28%, transparent);
+  border-left: 3px solid var(--interactive-accent);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  box-sizing: border-box;
+  animation: ct-fade-in 0.15s ease;
+}
+
+.ct-decision-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--interactive-accent);
+  min-width: 0;
+}
+
+.ct-decision-card-icon {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.ct-decision-card-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.ct-decision-card-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ct-decision-card-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ct-decision-card-body .ct-question,
+.ct-decision-card-body .ct-question-options,
+.ct-decision-card-body .ct-question-option {
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.ct-decision-card-body .ct-question-option-label {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ct-decision-card-body .ct-question-header,
+.ct-decision-card-body .ct-question-text {
+  overflow-wrap: anywhere;
+}
+
+.ct-decision-card-body .ct-question-other-text {
+  box-sizing: border-box;
+}
+
+.ct-decision-card-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ct-root .ct-decision-card-submit {
+  font-size: var(--font-ui-smaller);
+  padding: 4px 14px;
+  border-radius: 5px;
+  border: 1px solid var(--interactive-accent);
+  cursor: pointer;
+  font-weight: 500;
+  transition: background 0.1s, opacity 0.1s;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  margin-left: auto;
+}
+
+.ct-decision-card-submit:hover {
+  opacity: 0.88;
+}
+
+.ct-root .ct-decision-card-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ct-root.ct-mobile .ct-decision-card .ct-question-option,
+.ct-root.ct-mobile .ct-decision-card-submit {
+  min-height: 44px;
+}
+
+.ct-root.ct-mobile .ct-decision-card .ct-question-option {
+  align-items: center;
+}
+
+.ct-root.ct-mobile .ct-decision-card .ct-question-option.ct-question-option-other {
+  align-items: flex-start;
+}
+
+@media (pointer: coarse) {
+  .ct-decision-card .ct-question-option,
+  .ct-root .ct-decision-card-submit {
+    min-height: 44px;
+  }
+}
+
 /* -- Agent dashboard: permission-waiting row ------------------------- */
 .ct-agents-row-permission {
   border-left: 2px solid var(--color-orange, #e06c00);

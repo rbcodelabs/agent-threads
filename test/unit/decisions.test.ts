@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  assertDecisionOwnership, clearDecision, decisionToQuestion, formatDecisionAnswer, MAX_PENDING_DECISIONS_PER_THREAD,
+  assertDecisionOwnership, clearAllDecisions, clearDecision, decisionToQuestion, formatDecisionAnswer, MAX_PENDING_DECISIONS_PER_THREAD,
   postDecision, removeDecision,
 } from '../../src/decisions';
 import type { Thread } from '../../src/types';
@@ -56,6 +56,24 @@ describe('decision lifecycle', () => {
     expect(t.pendingDecisions?.map((d) => d.id)).toEqual([b.id]);
     removeDecision(t, b.id);
     expect('pendingDecisions' in t).toBe(false);
+  });
+
+  it('clearAllDecisions removes multiple decisions and cleans empty arrays', () => {
+    const empty = holder();
+    expect(clearAllDecisions(empty)).toBe(false);
+    expect('pendingDecisions' in empty).toBe(false);
+
+    const withEmptyArr: Pick<Thread, 'pendingDecisions'> = { pendingDecisions: [] };
+    expect(clearAllDecisions(withEmptyArr)).toBe(false);
+    expect('pendingDecisions' in withEmptyArr).toBe(false);
+
+    const populated = holder();
+    postDecision(populated, 'orch-a', input);
+    postDecision(populated, 'orch-b', input);
+    expect(clearAllDecisions(populated)).toBe(true);
+    expect('pendingDecisions' in populated).toBe(false);
+    expect(populated.pendingDecisions).toBeUndefined();
+    expect(clearAllDecisions(populated)).toBe(false);
   });
 
   it('maps to the AskQuestion the shared form renders, keyed by decision id', () => {

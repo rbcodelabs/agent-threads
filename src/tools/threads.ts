@@ -553,10 +553,11 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
   const boundPostThreadDecision = tool(
     'obsidian_post_thread_decision',
     [
-      'Asks Rick to make a decision, shown inline on the Agent Board card of the target thread (default: the',
-      'current thread, for portfolio-level items) with 2-4 options and an optional free-text Other. When Rick',
-      'answers, the answer arrives in THIS thread as a user message ("Decision <header> ... [<decisionId>]: <answer>"),',
-      'never in the target thread. Returns the decisionId. Use threads_clear_decision to withdraw a stale one.',
+      'Asks Rick to make a decision, shown inline on both the target thread\'s Agent Board card and its Conversation View',
+      '(default: the current thread, for portfolio-level items) with 2-4 options and an optional free-text Other.',
+      'When Rick answers, the answer arrives in THIS thread as a user message ("Decision <header> ... [<decisionId>]: <answer>"),',
+      'never in the target thread. Pending decisions on a thread are automatically dismissed if Rick sends a manual message',
+      'to that thread. Returns the decisionId. Use threads_clear_decision to withdraw a stale one.',
       'Prefer this over asking in prose when a thread is blocked on a choice only Rick can make.',
     ].join(' '),
     {

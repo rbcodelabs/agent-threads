@@ -34,7 +34,7 @@ import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
 import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun, PendingDecision } from './types';
-import { postDecision as postDecisionOn, clearDecision as clearDecisionOn, removeDecision, formatDecisionAnswer, type PostDecisionInput } from './decisions';
+import { postDecision as postDecisionOn, clearDecision as clearDecisionOn, clearAllDecisions, removeDecision, formatDecisionAnswer, type PostDecisionInput } from './decisions';
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { isAuthErrorTranscriptMessage } from './claudeAuthRecovery';
@@ -3603,6 +3603,15 @@ export class ThreadManager {
     if (!thread) throw new Error(`Thread not found: ${subjectThreadId}`);
     const cleared = clearDecisionOn(thread, callerThreadId, decisionId);
     if (cleared) this.notifyPendingDecisionsChanged(subjectThreadId);
+    return cleared;
+  }
+
+  /** Unconditionally dismisses all pending decisions on `threadId` (e.g. when Rick manually messages it). */
+  dismissDecisions(threadId: string): boolean {
+    const thread = this.threads.get(threadId);
+    if (!thread) return false;
+    const cleared = clearAllDecisions(thread);
+    if (cleared) this.notifyPendingDecisionsChanged(threadId);
     return cleared;
   }
 

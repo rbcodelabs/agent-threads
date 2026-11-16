@@ -128,6 +128,21 @@ describe('thread composer contributed command routing', () => {
     expect(view.manager.sendMessage).not.toHaveBeenCalled();
     expect(view.showCommandDivider).toHaveBeenCalledWith('Command is no longer available. Please try again.', true);
   });
+
+  it('dismisses pending decisions on the captured thread when a peer command is dispatched', async () => {
+    const { view, service } = fixture();
+    const dismissDecisions = vi.fn(() => true);
+    const saveSettings = vi.fn(async () => {});
+    view.manager.dismissDecisions = dismissDecisions;
+    view.plugin.saveSettings = saveSettings;
+    service.api.extensions.registerSlashCommand({ pluginId: 'peer' }, {
+      name: 'board',
+      thread: { description: 'Board', invoke: async () => ({ status: 'ok' as const }) },
+    });
+    await view.handleSendFromDispatch('/board x', [], null);
+    expect(dismissDecisions).toHaveBeenCalledWith('original');
+    expect(saveSettings).toHaveBeenCalledOnce();
+  });
 });
 
 /**
