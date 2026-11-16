@@ -10,7 +10,7 @@ import { daemonWsUrl, probeDaemon, type WebSocketFactory } from '../remote/Daemo
 import { signInToClaudeInContainer, type SpawnLike } from '../claudeContainerAuthCli';
 import { runnerEnv, createDefaultVmCommandRunner } from '../containerCli';
 import { LocalDaemonController, type LocalDaemonDeps } from './controller';
-import { signInToCodexInContainer } from './harnessLogin';
+import { signInToAntigravityInContainer, signInToCodexInContainer } from './harnessLogin';
 import { LocalDaemonGithubDelivery, type LocalDaemonGithubDeps } from './githubDelivery';
 import { CredsPusher } from './credsPusher';
 import type { McpSyncTransport } from '../remote/mcpSync';
@@ -162,6 +162,17 @@ export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonC
     harnessSignInRunner: (opts) => {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { spawn } = require('child_process') as typeof import('child_process');
+      if (opts.harness === 'antigravity') {
+        if (!opts.onCodePrompt) return Promise.resolve({ ok: false as const, error: 'Antigravity sign-in requires an authorization code prompt.' });
+        return signInToAntigravityInContainer({
+          spawn: spawn as unknown as SpawnLike,
+          hostEnv: runnerEnv() as NodeJS.ProcessEnv,
+          containerName: opts.containerName,
+          onProgress: opts.onProgress,
+          onUrl: opts.onUrl,
+          onCodePrompt: opts.onCodePrompt,
+        });
+      }
       return signInToCodexInContainer({
         spawn: spawn as unknown as SpawnLike,
         hostEnv: runnerEnv() as NodeJS.ProcessEnv,

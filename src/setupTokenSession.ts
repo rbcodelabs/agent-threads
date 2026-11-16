@@ -13,7 +13,7 @@ import { extractOAuthError, extractSignInUrl, extractToken, redactToken, renderT
 export type ChildLike = {
   stdout?: { on(event: 'data', cb: (chunk: Buffer | string) => void): unknown } | null;
   stderr?: { on(event: 'data', cb: (chunk: Buffer | string) => void): unknown } | null;
-  stdin?: { write(data: string): unknown } | null;
+  stdin?: { write(data: string): unknown; end?(): unknown } | null;
   on(event: 'close', cb: (code: number | null, signal: string | null) => void): unknown;
   on(event: 'error', cb: (err: Error) => void): unknown;
   kill(signal?: string): boolean;

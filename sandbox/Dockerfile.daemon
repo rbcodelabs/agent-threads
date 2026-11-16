@@ -9,13 +9,14 @@
 #   base         Node 22 + git, ripgrep, jq, curl, gh, build-essential + the bundle. NO Claude CLI.
 #   with-claude  base + Claude Code's native installer. The DEFAULT target (last stage), so a plain
 #                `docker build` gives a ready-to-run image.
-#   with-harnesses  (declared before with-claude, so the default target is unchanged) base + opt-in Codex and
-#                OpenCode CLIs: --build-arg INSTALL_CODEX=1 (npm @openai/codex, CODEX_VERSION, default latest),
+#   with-harnesses  (declared before with-claude, so the default target is unchanged) base + opt-in Codex,
+#                OpenCode and Antigravity CLIs: --build-arg INSTALL_CODEX=1 (npm @openai/codex, CODEX_VERSION, default latest),
 #                --build-arg INSTALL_OPENCODE=1 (npm opencode-ai, OPENCODE_VERSION, default 1.18.32, the version
-#                the adapter is verified against). Used with `--target with-harnesses`; see below.
+#                the adapter is verified against), --build-arg INSTALL_ANTIGRAVITY=1 (agy native binary from antigravity.google).
+#                Used with `--target with-harnesses`; see below.
 #
 # The image published to ghcr.io is the `base` stage only: Claude Code has no redistribution grant (the
-# same rule as the sandbox image, see .github/workflows/publish-sandbox-image.yml). Codex and OpenCode are
+# same rule as the sandbox image, see .github/workflows/publish-sandbox-image.yml). Codex, OpenCode and Antigravity are
 # likewise never baked into the published image (they live in the opt-in with-harnesses stage; the workflow builds
 # `base` only), so nothing is redistributed. Add the CLIs on your own machine, which is exactly what
 # installing them yourself is:
@@ -119,21 +120,29 @@ CMD ["--listen", "0.0.0.0", "--i-know-this-is-open", "--workspace", "/srv/worksp
 FROM ${BASE_IMAGE} AS with-harnesses
 ARG INSTALL_CODEX=0
 ARG INSTALL_OPENCODE=0
+ARG INSTALL_ANTIGRAVITY=0
 ARG CODEX_VERSION=latest
 ARG OPENCODE_VERSION=1.18.32
 USER root
-RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/harnesses
+RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/harnesses /opt/harnesses/bin
 USER agentthreads
 # opencode-ai fetches/links its platform binary in a postinstall script. npm 11 blocks dependency install scripts by
 # default (a silent skip leaves a launcher with no binary), so that one package is explicitly allowed; older npm
-# ignores the flag. The `--version` calls fail the build if either CLI did not end up runnable.
+# ignores the flag. Antigravity's installer runs with HOME=/opt/harnesses so staging and `agy install`'s duplicate copy
+# never touch the persisted HOME volume, and cleans them afterwards. The `--version` calls fail the build if any CLI
+# did not end up runnable.
 RUN set -eu; \
     pkgs=""; \
     if [ "$INSTALL_CODEX" = "1" ]; then pkgs="$pkgs @openai/codex@${CODEX_VERSION}"; fi; \
     if [ "$INSTALL_OPENCODE" = "1" ]; then pkgs="$pkgs opencode-ai@${OPENCODE_VERSION}"; fi; \
     if [ -n "$pkgs" ]; then npm install --global --no-audit --no-fund --allow-scripts=opencode-ai --prefix /opt/harnesses $pkgs; fi; \
+    if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then \
+      HOME=/opt/harnesses curl -fsSL https://antigravity.google/cli/install.sh | HOME=/opt/harnesses bash -s -- --dir /opt/harnesses/bin; \
+      rm -rf /opt/harnesses/.cache /opt/harnesses/.local /opt/harnesses/.gemini /opt/harnesses/.bashrc /opt/harnesses/.profile; \
+    fi; \
     if [ "$INSTALL_CODEX" = "1" ]; then /opt/harnesses/bin/codex --version; fi; \
-    if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi
+    if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi; \
+    if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then /opt/harnesses/bin/agy --version; fi
 ENV PATH="/opt/harnesses/bin:${PATH}"
 
 FROM ${BASE_IMAGE} AS with-claude

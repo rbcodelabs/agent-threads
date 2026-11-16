@@ -40,8 +40,11 @@ export interface LocalDaemonPanelDeps {
   confirm(message: string): Promise<boolean>;
   run(id: Exclude<LocalDaemonButtonId, 'sign-in'>, opts: { onProgress: (p: LocalDaemonProgress) => void }): Promise<unknown>;
   signIn(handlers: SignInHandlers): Promise<{ ok: true } | { ok: false; error: string }>;
-  /** Codex device-code login inside the container (URL and one-time code; nothing to paste back). */
-  signInHarness?(harness: 'codex', handlers: Pick<SignInHandlers, 'onProgress' | 'onUrl'>): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Codex device-code login or Antigravity browser OAuth login inside the container. */
+  signInHarness?(
+    harness: 'codex' | 'antigravity',
+    handlers: Pick<SignInHandlers, 'onProgress' | 'onUrl'> & Partial<Pick<SignInHandlers, 'onCodePrompt'>>,
+  ): Promise<{ ok: true } | { ok: false; error: string }>;
   /** Store the enabled harnesses (applied to the container by Apply changes / Start). */
   setHarnesses?(harnesses: LocalHarness[]): Promise<unknown>;
   cancel(): void;
@@ -197,7 +200,7 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
         })();
       });
       if (r.signIn && deps.signInHarness) {
-        const btn = row.createEl('button', { cls: 'ct-local-daemon-btn ct-local-daemon-btn-sign-in-codex', text: `Sign in to ${r.label}` });
+        const btn = row.createEl('button', { cls: `ct-local-daemon-btn ct-local-daemon-btn-sign-in-${r.signIn}`, text: `Sign in to ${r.label}` });
         btn.addEventListener('click', () => { void signInHarness(r.signIn!); });
       }
       if (r.command) row.createEl('code', { cls: 'ct-local-daemon-harness-command', text: r.command });
@@ -263,7 +266,21 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
     await refresh();
   };
 
-  const signInHarness = async (harness: 'codex'): Promise<void> => {
+  const promptForCode = (labelText: string): Promise<string | null> => new Promise<string | null>((resolve) => {
+    const wrap = signInEl.createDiv('ct-local-daemon-code');
+    wrap.createDiv({ cls: 'ct-local-daemon-code-label', text: labelText });
+    const row = wrap.createDiv('ct-local-daemon-code-row');
+    const input = row.createEl('input', { type: 'text', placeholder: 'Login code' });
+    const submit = row.createEl('button', { cls: 'ct-local-daemon-btn mod-cta', text: 'Submit' });
+    const cancel = row.createEl('button', { cls: 'ct-local-daemon-btn', text: 'Cancel' });
+    const finish = (value: string | null) => { wrap.remove(); resolve(value); };
+    submit.addEventListener('click', () => finish(input.value.trim() || null));
+    cancel.addEventListener('click', () => finish(null));
+    input.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') finish(input.value.trim() || null); });
+    input.focus();
+  });
+
+  const signInHarness = async (harness: 'codex' | 'antigravity'): Promise<void> => {
     localError = null;
     signInEl.empty();
     const link = signInEl.createDiv('ct-local-daemon-signin-link');
@@ -275,6 +292,9 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
         link.createEl('a', { text: 'Browser didn’t open? Open the sign-in page', href: url, attr: { target: '_blank', rel: 'noopener' } });
         try { deps.openUrl?.(url); } catch { /* the link is the fallback */ }
       },
+      ...(harness === 'antigravity'
+        ? { onCodePrompt: () => promptForCode('Paste the authorization code (or callback URL) shown in your browser:') }
+        : {}),
     });
     signInEl.empty();
     if (!result.ok) localError = result.error;
@@ -292,19 +312,7 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
         link.createEl('a', { text: 'Browser didn’t open? Open the sign-in page', href: url, attr: { target: '_blank', rel: 'noopener' } });
         try { deps.openUrl?.(url); } catch { /* the link is the fallback */ }
       },
-      onCodePrompt: () => new Promise<string | null>((resolve) => {
-        const wrap = signInEl.createDiv('ct-local-daemon-code');
-        wrap.createDiv({ cls: 'ct-local-daemon-code-label', text: 'Paste the login code shown in your browser:' });
-        const row = wrap.createDiv('ct-local-daemon-code-row');
-        const input = row.createEl('input', { type: 'text', placeholder: 'Login code' });
-        const submit = row.createEl('button', { cls: 'ct-local-daemon-btn mod-cta', text: 'Submit' });
-        const cancel = row.createEl('button', { cls: 'ct-local-daemon-btn', text: 'Cancel' });
-        const finish = (value: string | null) => { wrap.remove(); resolve(value); };
-        submit.addEventListener('click', () => finish(input.value.trim() || null));
-        cancel.addEventListener('click', () => finish(null));
-        input.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') finish(input.value.trim() || null); });
-        input.focus();
-      }),
+      onCodePrompt: () => promptForCode('Paste the login code shown in your browser:'),
     });
     signInEl.empty();
     if (!result.ok) localError = result.error;

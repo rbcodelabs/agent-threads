@@ -17,6 +17,7 @@ import {
   PULL_TIMEOUT_MS,
   LOCAL_TOKEN_NAME,
   VERIFY_OK_MARKER,
+  HARNESS_CLI_EXE,
   thinDockerfileFor,
   harnessProbeArgs,
   normalizeHarnesses,
@@ -184,6 +185,7 @@ function installNote(harnesses?: readonly string[]): string {
     ...(set.includes('claude') ? ['the Claude CLI from Anthropic'] : []),
     ...(set.includes('codex') ? ['the Codex CLI (npm @openai/codex)'] : []),
     ...(set.includes('opencode') ? ['the OpenCode CLI (npm opencode-ai)'] : []),
+    ...(set.includes('antigravity') ? ['the Antigravity CLI from Google (antigravity.google)'] : []),
   ];
   return `installs ${parts.join(', ')}`;
 }
@@ -221,7 +223,7 @@ export async function buildThinImage(d: StepDeps, version: string, harnesses?: r
 export async function verifyThinImage(d: StepDeps, version: string, harnesses?: readonly string[]): Promise<void> {
   const r = await run(d, verifyImageArgs(version, harnesses), 60_000);
   if (r.exitCode !== 0 || !r.stdout.includes(VERIFY_OK_MARKER)) {
-    throw failed('verify', `${localImageRef(version, harnesses)} was built but is missing ${[...normalizeHarnesses(harnesses), 'agent-threads', 'git'].join(', ')};`, r);
+    throw failed('verify', `${localImageRef(version, harnesses)} was built but is missing ${[...normalizeHarnesses(harnesses).map((h) => HARNESS_CLI_EXE[h]), 'agent-threads', 'git'].join(', ')};`, r);
   }
 }
 

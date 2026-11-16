@@ -9,8 +9,11 @@ import { snap } from '../helpers/localDaemonSnap';
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const mount = () => { const el = document.createElement('div'); document.body.appendChild(el); return el; };
-const probe = (codexSignedIn: boolean) => ({
-  claude: { cli: true, signedIn: false }, codex: { cli: true, signedIn: codexSignedIn }, opencode: { cli: true, signedIn: false },
+const probe = (codexSignedIn: boolean, antigravitySignedIn = false) => ({
+  claude: { cli: true, signedIn: false },
+  codex: { cli: true, signedIn: codexSignedIn },
+  opencode: { cli: true, signedIn: false },
+  antigravity: { cli: true, signedIn: antigravitySignedIn },
 });
 
 function setup(snapshot: LocalDaemonSnapshot, over: Partial<LocalDaemonPanelDeps> = {}) {
@@ -41,14 +44,16 @@ const rowOf = (parent: HTMLElement, id: string) => parent.querySelector(`.ct-loc
 const boxOf = (parent: HTMLElement, id: string) => rowOf(parent, id).querySelector('input[type=checkbox]') as HTMLInputElement;
 
 describe('Local daemon panel: harness toggles', () => {
-  it('lists the three harnesses with their state; Claude is on by default and, being the only one on, cannot be turned off', async () => {
+  it('lists the four harnesses with their state; Claude is on by default and, being the only one on, cannot be turned off', async () => {
     const { parent } = setup(snap({}, { harnesses: ['claude'] }));
     await flush();
     expect(boxOf(parent, 'claude').checked).toBe(true);
     expect(boxOf(parent, 'claude').disabled).toBe(true);
     expect(boxOf(parent, 'codex').checked).toBe(false);
     expect(boxOf(parent, 'opencode').checked).toBe(false);
+    expect(boxOf(parent, 'antigravity').checked).toBe(false);
     expect(rowOf(parent, 'codex').textContent).toContain('Off');
+    expect(rowOf(parent, 'antigravity').textContent).toContain('Off');
   });
 
   it('turning one on stores the new set (Claude kept) and re-reads the state', async () => {
@@ -96,7 +101,7 @@ describe('Local daemon panel: harness toggles', () => {
 });
 
 describe('Local daemon panel: harness sign-in state', () => {
-  const all = { harnesses: ['claude', 'codex', 'opencode'] as Array<'claude' | 'codex' | 'opencode'> };
+  const all = { harnesses: ['claude', 'codex', 'opencode', 'antigravity'] as Array<'claude' | 'codex' | 'opencode' | 'antigravity'> };
 
   it('shows CLI and sign-in state per harness', async () => {
     const { parent } = setup(snap({ credentialInVolume: true, harnessProbe: probe(true) }, all));
@@ -124,6 +129,30 @@ describe('Local daemon panel: harness sign-in state', () => {
     expect(d.signInHarness).toHaveBeenCalledWith('codex', expect.anything());
     expect(d.openUrl).toHaveBeenCalledWith('https://auth.openai.com/codex/device');
     expect(linkSeen).toContain('auth.openai.com');
+  });
+
+  it('Antigravity not signed in: Sign in to Antigravity opens the Google URL, renders the code input, and submits the pasted code', async () => {
+    const { d, parent } = setup(snap({ credentialInVolume: true, harnessProbe: probe(true, false) }, all));
+    await flush();
+    const button = rowOf(parent, 'antigravity').querySelector('button') as HTMLButtonElement;
+    expect(button.textContent).toBe('Sign in to Antigravity');
+    expect(button.classList.contains('ct-local-daemon-btn-sign-in-antigravity')).toBe(true);
+    let pastedCode: string | null = null;
+    d.signInHarness.mockImplementationOnce(async (_h: string, handlers: { onProgress: (t: string) => void; onUrl: (u: string) => void; onCodePrompt?: () => Promise<string | null> }) => {
+      handlers.onUrl('https://accounts.google.com/o/oauth2/auth');
+      const codePromise = handlers.onCodePrompt!();
+      const input = parent.querySelector('.ct-local-daemon-code input') as HTMLInputElement;
+      expect(input).toBeTruthy();
+      input.value = '  4/0AcvDMrTestCode  ';
+      (parent.querySelector('.ct-local-daemon-code button.mod-cta') as HTMLButtonElement).click();
+      pastedCode = await codePromise;
+      return { ok: true as const };
+    });
+    button.click();
+    await flush();
+    expect(d.signInHarness).toHaveBeenCalledWith('antigravity', expect.objectContaining({ onCodePrompt: expect.any(Function) }));
+    expect(d.openUrl).toHaveBeenCalledWith('https://accounts.google.com/o/oauth2/auth');
+    expect(pastedCode).toBe('4/0AcvDMrTestCode');
   });
 
   it('a Codex sign-in failure is shown with the exact fallback command', async () => {

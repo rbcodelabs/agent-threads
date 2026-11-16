@@ -38,23 +38,37 @@ export const MASKED_VAULT_DIRS: readonly string[] = ['.geode', '.obsidian'];
 export const DAEMON_UID = 10001;
 /** Where the `with-claude` layer puts the CLI (outside every VOLUME path). */
 export const CLAUDE_BINARY_IN_IMAGE = '/opt/claude/.local/bin/claude';
-/** Where the `with-harnesses` layer puts the Codex and OpenCode CLIs (outside every VOLUME path). */
+/** Where the `with-harnesses` layer puts the Codex, OpenCode and Antigravity CLIs (outside every VOLUME path). */
 export const HARNESS_BIN_DIR = '/opt/harnesses/bin';
 export const CODEX_BINARY_IN_IMAGE = `${HARNESS_BIN_DIR}/codex`;
 export const OPENCODE_BINARY_IN_IMAGE = `${HARNESS_BIN_DIR}/opencode`;
+export const ANTIGRAVITY_BINARY_IN_IMAGE = `${HARNESS_BIN_DIR}/agy`;
 /** The daemon user's HOME inside the container: in the data volume, so logins survive restarts and updates. */
 export const DAEMON_HOME = `${DATA_MOUNT}/home`;
-/** Where `codex login` and `opencode auth login` leave their credentials (inside {@link DAEMON_HOME}). */
+/** Where `codex login`, `opencode auth login` and `agy acp --login` leave their credentials (inside {@link DAEMON_HOME}). */
 export const CODEX_AUTH_FILE = `${DAEMON_HOME}/.codex/auth.json`;
 export const OPENCODE_AUTH_FILE = `${DAEMON_HOME}/.local/share/opencode/auth.json`;
+export const ANTIGRAVITY_OAUTH_TOKEN_FILE = `${DAEMON_HOME}/.gemini/jetski-standalone-oauth-token`;
+export const ANTIGRAVITY_OAUTH_CREDS_FILE = `${DAEMON_HOME}/.gemini/oauth_creds.json`;
 
 // ── Harnesses ────────────────────────────────────────────────────────────────
 
-export type LocalHarness = 'claude' | 'codex' | 'opencode';
+export type LocalHarness = 'claude' | 'codex' | 'opencode' | 'antigravity';
 /** Canonical order: also the order of the daemon's allowed set and of the image tag. */
-export const LOCAL_HARNESSES: readonly LocalHarness[] = ['claude', 'codex', 'opencode'];
+export const LOCAL_HARNESSES: readonly LocalHarness[] = ['claude', 'codex', 'opencode', 'antigravity'];
 export const DEFAULT_LOCAL_HARNESSES: readonly LocalHarness[] = ['claude'];
-export const HARNESS_LABEL: Record<LocalHarness, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
+export const HARNESS_LABEL: Record<LocalHarness, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  opencode: 'OpenCode',
+  antigravity: 'Antigravity',
+};
+export const HARNESS_CLI_EXE: Record<LocalHarness, string> = {
+  claude: 'claude',
+  codex: 'codex',
+  opencode: 'opencode',
+  antigravity: 'agy',
+};
 
 /** The enabled set from settings: known names only, canonical order, never empty (Claude, the default). */
 export function normalizeHarnesses(raw: readonly string[] | undefined): LocalHarness[] {
@@ -77,9 +91,10 @@ export const CREDS_TOKEN_NAME = 'geode-creds';
 export const CLI_TOKEN_FILE = `${DATA_MOUNT}/cli-token`;
 /** Where the plugin copies skill plugin directories (guest paths go in the session spec; the daemon validates them). */
 export const SKILLS_DIR = `${DATA_MOUNT}/skills`;
-/** The daemon user's home (HOME in the image): the CLI reads `~/.claude`, the AWS SDK `~/.aws`. */
+/** The daemon user's home (HOME in the image): CLIs read `~/.claude` and `~/.gemini`, the AWS SDK `~/.aws`. */
 export const HOME_DIR = `${DATA_MOUNT}/home`;
 export const CLAUDE_HOME_DIR = `${HOME_DIR}/.claude`;
+export const GEMINI_HOME_DIR = `${HOME_DIR}/.gemini`;
 export const AWS_HOME_DIR = `${HOME_DIR}/.aws`;
 /** Credential kinds holding a session's environment: `sessenv-<project id>`; the session spec carries only the name. */
 export { SESSION_ENV_KIND_PREFIX, sessionEnvKind } from '../credsDelivery';
@@ -201,36 +216,44 @@ ENV PATH="/opt/claude/.local/bin:\${PATH}" \\
 /**
  * Body of the `with-harnesses` stage of `sandbox/Dockerfile.daemon`, verbatim (everything after its `FROM` line, up to
  * the next stage). Pinned to the real file by a unit test, like {@link WITH_CLAUDE_STAGE_BODY}. It installs nothing
- * unless `INSTALL_CODEX` / `INSTALL_OPENCODE` are `1`, which {@link buildThinImageArgs} passes.
+ * unless `INSTALL_CODEX` / `INSTALL_OPENCODE` / `INSTALL_ANTIGRAVITY` are `1`, which {@link buildThinImageArgs} passes.
  */
 export const WITH_HARNESSES_STAGE_BODY = `ARG INSTALL_CODEX=0
 ARG INSTALL_OPENCODE=0
+ARG INSTALL_ANTIGRAVITY=0
 ARG CODEX_VERSION=latest
 ARG OPENCODE_VERSION=1.18.32
 USER root
-RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/harnesses
+RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/harnesses /opt/harnesses/bin
 USER agentthreads
 # opencode-ai fetches/links its platform binary in a postinstall script. npm 11 blocks dependency install scripts by
 # default (a silent skip leaves a launcher with no binary), so that one package is explicitly allowed; older npm
-# ignores the flag. The \`--version\` calls fail the build if either CLI did not end up runnable.
+# ignores the flag. Antigravity's installer runs with HOME=/opt/harnesses so staging and \`agy install\`'s duplicate copy
+# never touch the persisted HOME volume, and cleans them afterwards. The \`--version\` calls fail the build if any CLI
+# did not end up runnable.
 RUN set -eu; \\
     pkgs=""; \\
     if [ "$INSTALL_CODEX" = "1" ]; then pkgs="$pkgs @openai/codex@\${CODEX_VERSION}"; fi; \\
     if [ "$INSTALL_OPENCODE" = "1" ]; then pkgs="$pkgs opencode-ai@\${OPENCODE_VERSION}"; fi; \\
     if [ -n "$pkgs" ]; then npm install --global --no-audit --no-fund --allow-scripts=opencode-ai --prefix /opt/harnesses $pkgs; fi; \\
+    if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then \\
+      HOME=/opt/harnesses curl -fsSL https://antigravity.google/cli/install.sh | HOME=/opt/harnesses bash -s -- --dir /opt/harnesses/bin; \\
+      rm -rf /opt/harnesses/.cache /opt/harnesses/.local /opt/harnesses/.gemini /opt/harnesses/.bashrc /opt/harnesses/.profile; \\
+    fi; \\
     if [ "$INSTALL_CODEX" = "1" ]; then /opt/harnesses/bin/codex --version; fi; \\
-    if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi
+    if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi; \\
+    if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then /opt/harnesses/bin/agy --version; fi
 ENV PATH="/opt/harnesses/bin:\${PATH}"
 `;
 
 /**
- * The thin layer for an enabled set: the published base, then the Codex/OpenCode CLIs if either is on, then the
- * Claude CLI if it is on. Claude-only is byte for byte what it was before harness toggles existed.
+ * The thin layer for an enabled set: the published base, then the Codex/OpenCode/Antigravity CLIs if any is on, then
+ * the Claude CLI if it is on. Claude-only is byte for byte what it was before harness toggles existed.
  */
 export function thinDockerfileFor(harnesses?: readonly string[]): string {
   const set = normalizeHarnesses(harnesses);
   const names = set.map((h) => HARNESS_LABEL[h]).join(', ');
-  const others = set.includes('codex') || set.includes('opencode');
+  const others = set.includes('codex') || set.includes('opencode') || set.includes('antigravity');
   if (!others) {
     return `# agent-threads local daemon: adds the Claude Code CLI on top of the published daemon image.
 # Generated by the plugin from the \`with-claude\` stage of sandbox/Dockerfile.daemon.
@@ -438,6 +461,7 @@ export function buildThinImageArgs(opts: { version: string; dockerfilePath: stri
     '--build-arg', `BASE_IMAGE=${publishedImageRef(opts.version)}`,
     ...(set.includes('codex') ? ['--build-arg', 'INSTALL_CODEX=1'] : []),
     ...(set.includes('opencode') ? ['--build-arg', 'INSTALL_OPENCODE=1'] : []),
+    ...(set.includes('antigravity') ? ['--build-arg', 'INSTALL_ANTIGRAVITY=1'] : []),
     '--label', `${LABEL_IMAGE_VERSION}=${opts.version}`,
     '--progress', 'plain',
     '-f', opts.dockerfilePath,
@@ -448,7 +472,7 @@ export function buildThinImageArgs(opts: { version: string; dockerfilePath: stri
 /** Runs the built image and asserts the tools the daemon needs exist; prints OK on success. */
 export function verifyImageArgs(version: string, harnesses?: readonly string[]): string[] {
   const set = normalizeHarnesses(harnesses);
-  const checks = [...set.map((h) => `command -v ${h}`), 'command -v agent-threads', 'command -v git'];
+  const checks = [...set.map((h) => `command -v ${HARNESS_CLI_EXE[h]}`), 'command -v agent-threads', 'command -v git'];
   return ['run', '--rm', '--entrypoint', 'sh', localImageRef(version, set), '-c', `${checks.join(' && ')} && echo LOCAL_DAEMON_IMAGE_OK`];
 }
 export const VERIFY_OK_MARKER = 'LOCAL_DAEMON_IMAGE_OK';
@@ -647,17 +671,18 @@ const AS_DAEMON = (name: string): string[] => ['exec', '--user', String(DAEMON_U
 
 /**
  * One `exec` in the running container that prints `<harness>.cli=0|1` (is the CLI in the image) and
- * `codex.auth=0|1` / `opencode.auth=0|1` (did a login leave a non-empty credential file in the persisted HOME).
- * Claude's sign-in is the existing credential file / keychain token, not probed here. Reads file SIZES only: the
- * credentials are never printed.
+ * `codex.auth=0|1` / `opencode.auth=0|1` / `antigravity.auth=0|1` (did a login leave a non-empty credential file in
+ * the persisted HOME). Claude's sign-in is the existing credential file / keychain token, not probed here. Reads file
+ * SIZES only: the credentials are never printed.
  */
 export const HARNESS_PROBE_SCRIPT = [
-  `for p in claude:${CLAUDE_BINARY_IN_IMAGE} codex:${CODEX_BINARY_IN_IMAGE} opencode:${OPENCODE_BINARY_IN_IMAGE}; do`,
+  `for p in claude:${CLAUDE_BINARY_IN_IMAGE} codex:${CODEX_BINARY_IN_IMAGE} opencode:${OPENCODE_BINARY_IN_IMAGE} antigravity:${ANTIGRAVITY_BINARY_IN_IMAGE}; do`,
   '  n="${p%%:*}"; f="${p#*:}"',
   '  if [ -x "$f" ]; then echo "$n.cli=1"; else echo "$n.cli=0"; fi',
   'done',
   `if [ -s ${CODEX_AUTH_FILE} ]; then echo codex.auth=1; else echo codex.auth=0; fi`,
   `if [ -s ${OPENCODE_AUTH_FILE} ]; then echo opencode.auth=1; else echo opencode.auth=0; fi`,
+  `if [ -s ${ANTIGRAVITY_OAUTH_TOKEN_FILE} ] || [ -s ${ANTIGRAVITY_OAUTH_CREDS_FILE} ]; then echo antigravity.auth=1; else echo antigravity.auth=0; fi`,
 ].join('\n');
 
 export function harnessProbeArgs(name: string): string[] {
@@ -669,12 +694,21 @@ export function codexLoginArgs(name: string): string[] {
   return [...AS_DAEMON(name), CODEX_BINARY_IN_IMAGE, 'login', '--device-auth'];
 }
 
+/** `agy acp --login`: prints a Google OAuth URL, reads one line (authorization code or callback URL) on stdin, writes ~/.gemini token. */
+export function antigravityLoginArgs(name: string): string[] {
+  return ['exec', '-i', '--user', String(DAEMON_UID), name, ANTIGRAVITY_BINARY_IN_IMAGE, 'acp', '--login'];
+}
+
 /**
- * The exact line to run by hand for a login that cannot be driven from Settings (OpenCode's `auth login` is an
- * interactive provider picker). `containerBinary` is the managed `container` CLI, which is not on PATH.
+ * The exact line to run by hand for a terminal login inside the container (fallback for Codex/Antigravity, primary for
+ * OpenCode whose `auth login` is an interactive provider picker). `containerBinary` is the managed `container` CLI.
  */
 export function manualLoginCommand(harness: Exclude<LocalHarness, 'claude'>, containerName: string, containerBinary = 'container'): string {
   const bin = /[^A-Za-z0-9_./-]/.test(containerBinary) ? `'${containerBinary.replace(/'/g, `'\\''`)}'` : containerBinary;
-  const cli = harness === 'codex' ? `${CODEX_BINARY_IN_IMAGE} login --device-auth` : `${OPENCODE_BINARY_IN_IMAGE} auth login`;
+  const cli = harness === 'codex'
+    ? `${CODEX_BINARY_IN_IMAGE} login --device-auth`
+    : harness === 'antigravity'
+      ? `${ANTIGRAVITY_BINARY_IN_IMAGE} acp --login`
+      : `${OPENCODE_BINARY_IN_IMAGE} auth login`;
   return `${bin} exec -it --user ${DAEMON_UID} ${containerName} ${cli}`;
 }
