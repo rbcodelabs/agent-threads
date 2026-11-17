@@ -23,8 +23,10 @@ import {
 } from '../../src/AntigravitySession';
 import type { AskQuestion } from '../../src/types';
 import {
+  cleanBrainArgBoolean,
   cleanBrainArgString,
   cleanBrainArgStringArray,
+  extractBrainToolCallBgMeta,
   parseAntigravityBackgroundTask,
   parseAntigravityCreatedSubagent,
   parseAntigravityWakeupMessage,
@@ -1186,6 +1188,244 @@ describe('AntigravitySession subagents and post-turn brain wakeups', () => {
     }));
     expect(h.messages).toContain('Late review complete.');
     expect(h.messages[h.messages.length - 1]).toBe('Hello from Antigravity.');
+  });
+
+  it('normalizes IsDaemon booleans across full and compact brain transcripts and extracts per-tool bg metadata', () => {
+    expect(cleanBrainArgBoolean(true)).toBe(true);
+    expect(cleanBrainArgBoolean('true')).toBe(true);
+    expect(cleanBrainArgBoolean('TRUE')).toBe(true);
+    expect(cleanBrainArgBoolean(' true ')).toBe(true);
+    expect(cleanBrainArgBoolean('"true"')).toBe(true);
+
+    expect(cleanBrainArgBoolean(false)).toBe(false);
+    expect(cleanBrainArgBoolean('false')).toBe(false);
+    expect(cleanBrainArgBoolean('"false"')).toBe(false);
+    expect(cleanBrainArgBoolean(1)).toBe(false);
+    expect(cleanBrainArgBoolean(0)).toBe(false);
+    expect(cleanBrainArgBoolean('')).toBe(false);
+    expect(cleanBrainArgBoolean(null)).toBe(false);
+    expect(cleanBrainArgBoolean(undefined)).toBe(false);
+    expect(cleanBrainArgBoolean({ IsDaemon: true })).toBe(false);
+
+    expect(extractBrainToolCallBgMeta('run_command', { IsDaemon: true })).toEqual({ bgCapable: true, isDaemon: true });
+    expect(extractBrainToolCallBgMeta('run_command', { IsDaemon: '"true"' })).toEqual({ bgCapable: true, isDaemon: true });
+    expect(extractBrainToolCallBgMeta('run_command', { IsDaemon: false })).toEqual({ bgCapable: true, isDaemon: false });
+    expect(extractBrainToolCallBgMeta('run_command', { IsDaemon: '"false"' })).toEqual({ bgCapable: true, isDaemon: false });
+    expect(extractBrainToolCallBgMeta('run_command', undefined)).toEqual({ bgCapable: true, isDaemon: false });
+
+    expect(extractBrainToolCallBgMeta('schedule', { IsDaemon: true })).toEqual({ bgCapable: true, isDaemon: true });
+    expect(extractBrainToolCallBgMeta('schedule', { IsDaemon: '"true"' })).toEqual({ bgCapable: true, isDaemon: true });
+    expect(extractBrainToolCallBgMeta('schedule', { IsDaemon: false })).toEqual({ bgCapable: true, isDaemon: false });
+
+    expect(extractBrainToolCallBgMeta('run_workflow', { IsDaemon: true })).toEqual({ bgCapable: true, isDaemon: false });
+    expect(extractBrainToolCallBgMeta('read_file', { IsDaemon: true })).toEqual({ bgCapable: false, isDaemon: false });
+    expect(extractBrainToolCallBgMeta(undefined, { IsDaemon: true })).toEqual({ bgCapable: false, isDaemon: false });
+  });
+
+  it('ignores IsDaemon run_command and schedule background tasks in a mixed PLANNER_RESPONSE batch so the turn finishes immediately', async () => {
+    let releasePermission: (allow: boolean) => void = () => undefined;
+    const h = makeHarness({
+      brainOptions: { wakeupGraceMs: 5_000 },
+      permission: () => new Promise<boolean>((resolve) => { releasePermission = resolve; }),
+    });
+    await h.session.start(h.options);
+    h.session.send('SHELL start dev server and standing cron');
+    await vi.waitFor(() => expect(h.session.hasPendingPermission).toBe(true), { timeout: 10_000 });
+    const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+    const bgHeader = 'Tool is running as a ' + 'background task with task id: ';
+
+    h.appendBrain(sessionId, [
+      {
+        step_index: 0,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [
+          { id: 'cmd-sync', name: 'run_command', args: { CommandLine: 'lsof -i :3117', WaitMsBeforeAsync: 5000 } },
+          { id: 'cmd-daemon', name: 'run_command', args: { CommandLine: 'npx next dev -p 3117', WaitMsBeforeAsync: 500, IsDaemon: true } },
+          { id: 'sched-daemon', name: 'schedule', args: { CronExpression: '*/5 * * * *', Prompt: 'Check health', IsDaemon: '"true"' } },
+        ],
+      },
+      {
+        step_index: 1,
+        source: 'MODEL',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: 'Created At: 2026-11-17T10:00:00Z\nCompleted At: 2026-11-17T10:00:00Z\nCommand exited with code 1.\n',
+      },
+      {
+        step_index: 2,
+        source: 'MODEL',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: `Created At: 2026-11-17T10:00:01Z\nCompleted At: 2026-11-17T10:00:02Z\n${bgHeader}${sessionId}/task-301\n`,
+      },
+      {
+        step_index: 3,
+        source: 'MODEL',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: `${bgHeader}${sessionId}/task-302\n`,
+      },
+      { step_index: 4, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Ran the command.' },
+    ]);
+
+    releasePermission(true);
+    await vi.waitFor(() => expect(h.messages).toContain('Ran the command.'), { timeout: 5_000 });
+    expect(h.tasksStarted).toEqual([]);
+    expect(h.done).toHaveBeenCalledTimes(1);
+    expect(h.session.turnInFlight).toBe(false);
+    expect(h.session.canIdleReap()).toBe(true);
+  });
+
+  it('tracks non-daemon async run_command while ignoring a sibling IsDaemon run_command in the same PLANNER_RESPONSE', async () => {
+    let releasePermission: (allow: boolean) => void = () => undefined;
+    const h = makeHarness({
+      brainOptions: { wakeupGraceMs: 5_000 },
+      permission: () => new Promise<boolean>((resolve) => { releasePermission = resolve; }),
+    });
+    await h.session.start(h.options);
+    h.session.send('SHELL start daemon and run e2e suite');
+    await vi.waitFor(() => expect(h.session.hasPendingPermission).toBe(true), { timeout: 10_000 });
+    const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+    const bgHeader = 'Tool is running as a ' + 'background task with task id: ';
+
+    h.appendBrain(sessionId, [
+      {
+        step_index: 0,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [
+          { id: 'daemon-dev', name: 'run_command', args: { CommandLine: 'npm run dev', WaitMsBeforeAsync: 500, IsDaemon: '"true"' } },
+          { id: 'async-suite', name: 'run_command', args: { CommandLine: 'npm run test:e2e', WaitMsBeforeAsync: 500, IsDaemon: '"false"' } },
+        ],
+      },
+      {
+        step_index: 1,
+        source: 'MODEL',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: `${bgHeader}${sessionId}/task-daemon-1\n`,
+      },
+      {
+        step_index: 2,
+        source: 'MODEL',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: `${bgHeader}${sessionId}/task-suite-2\n`,
+      },
+      { step_index: 3, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Ran the command.' },
+    ]);
+
+    releasePermission(true);
+    await vi.waitFor(() => expect(h.messages).toContain('Ran the command.'), { timeout: 5_000 });
+    expect(h.tasksStarted).toEqual([
+      expect.objectContaining({
+        taskId: `${sessionId}/task-suite-2`,
+        description: 'Background task',
+        isWorkflow: false,
+        taskType: 'bash',
+      }),
+    ]);
+    expect(h.done).not.toHaveBeenCalled();
+    expect(h.session.turnInFlight).toBe(true);
+
+    // Only the non-daemon task finishes and wakes the parent; the IsDaemon dev server remains running indefinitely.
+    h.appendBrain(sessionId, [
+      {
+        step_index: 4,
+        source: 'SYSTEM',
+        type: 'SYSTEM_MESSAGE',
+        status: 'DONE',
+        content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-17T10:01:00Z sender=${sessionId}/task-suite-2\nE2E suite green.\n</SYSTEM_MESSAGE>`,
+      },
+      {
+        step_index: 5,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: 'E2E suite passed while dev server stays up.',
+      },
+    ]);
+
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(1), { timeout: 2_000 });
+    expect(h.tasksNotified).toContainEqual({
+      taskId: `${sessionId}/task-suite-2`,
+      status: 'completed',
+      summary: 'E2E suite green.',
+    });
+    expect(h.messages).toContain('E2E suite passed while dev server stays up.');
+    expect(h.session.turnInFlight).toBe(false);
+  });
+
+  it('completes a child subagent immediately when its mixed PLANNER_RESPONSE starts a compact IsDaemon run_command', async () => {
+    const h = makeHarness({ brainOptions: { wakeupGraceMs: 2_000 } });
+    await h.session.start(h.options);
+    h.session.send('SUBAGENT_BRAIN child-daemon-cmd');
+
+    await vi.waitFor(() => expect(h.tasksStarted).toHaveLength(1), { timeout: 10_000 });
+    await vi.waitFor(() => expect(h.messages).toContain('Waiting on Auth Researcher.'), { timeout: 10_000 });
+    const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+    const bgHeader = 'Tool is running as a ' + 'background task with task id: ';
+
+    h.appendBrain('child-sub-1', [
+      {
+        step_index: 0,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [
+          { id: 'c-read', name: 'read_file', args: { Path: '/repo/package.json' } },
+          { id: 'c-daemon', name: 'run_command', args: { CommandLine: 'npx next dev -p 3117', WaitMsBeforeAsync: 500, IsDaemon: '"true"' } },
+        ],
+      },
+      { step_index: 1, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: '{"name":"app"}' },
+      {
+        step_index: 2,
+        source: 'MODEL',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: `Created At: 2026-11-17T10:02:00Z\nCompleted At: 2026-11-17T10:02:01Z\n${bgHeader}child-sub-1/task-408\n`,
+      },
+      {
+        step_index: 3,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [
+          { id: 'c-msg', name: 'send_message', args: { Recipient: JSON.stringify(sessionId), Message: '"Dev server listening on 3117."' } },
+        ],
+      },
+      { step_index: 4, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'Sent.' },
+      { step_index: 5, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Started daemon server and reported back.' },
+    ]);
+
+    await vi.waitFor(() => expect(h.tasksNotified).toContainEqual({
+      taskId: 'child-sub-1',
+      status: 'completed',
+      summary: 'Started daemon server and reported back.',
+    }), { timeout: 500 });
+
+    h.appendBrain(sessionId, [
+      {
+        step_index: 4,
+        source: 'SYSTEM',
+        type: 'SYSTEM_MESSAGE',
+        status: 'DONE',
+        content: '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-17T10:02:02Z sender=child-sub-1\nDev server listening on 3117.\n</SYSTEM_MESSAGE>',
+      },
+      { step_index: 5, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Subagent started dev server cleanly.' },
+    ]);
+
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(1), { timeout: 2_000 });
+    expect(h.session.turnInFlight).toBe(false);
+    expect(h.session.canIdleReap()).toBe(true);
+    expect(h.messages).toContain('Subagent started dev server cleanly.');
   });
 });
 
