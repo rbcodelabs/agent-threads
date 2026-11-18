@@ -331,6 +331,50 @@ describe('pendingPlan — set and persist', () => {
   });
 });
 
+describe('per-thread Codex network opt-in', () => {
+  it('persists rapid On then Off in order after live updates complete', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('Codex', os.tmpdir(), undefined, 'codex');
+    let finishOn!: () => void;
+    const onPending = new Promise<void>((resolve) => { finishOn = resolve; });
+    const observed: boolean[] = [];
+    (manager as any).sessions.set(thread.id, {
+      setNetworkAccessEnabled: async (enabled: boolean) => {
+        observed.push(enabled);
+        if (enabled) await onPending;
+      },
+    });
+    const on = manager.setThreadCodexNetworkAccess(thread.id, true);
+    const off = manager.setThreadCodexNetworkAccess(thread.id, false);
+    await Promise.resolve();
+    expect(observed).toEqual([true]);
+    finishOn();
+    await Promise.all([on, off]);
+    expect(observed).toEqual([true, false]);
+    expect(manager.getThread(thread.id)?.codexNetworkAccessEnabled).toBe(false);
+  });
+  it('does not persist a change rejected by the running Codex session', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('Codex', os.tmpdir(), undefined, 'codex');
+    (manager as any).sessions.set(thread.id, {
+      setNetworkAccessEnabled: async () => { throw new Error('policy rejected'); },
+    });
+    await expect(manager.setThreadCodexNetworkAccess(thread.id, true)).rejects.toThrow('policy rejected');
+    expect(manager.getThread(thread.id)?.codexNetworkAccessEnabled).toBeUndefined();
+  });
+  it('persists only on the selected thread and remains independent of permission mode', async () => {
+    const manager = makeManager();
+    const selected = manager.createThread('Selected', os.tmpdir(), undefined, 'codex');
+    const other = manager.createThread('Other', os.tmpdir(), undefined, 'codex');
+    await manager.setThreadCodexNetworkAccess(selected.id, true);
+    manager.setThreadPermissionMode(selected.id, 'bypassPermissions');
+    expect(JSON.parse(JSON.stringify(manager.getThread(selected.id))).codexNetworkAccessEnabled).toBe(true);
+    expect(manager.getThread(other.id)?.codexNetworkAccessEnabled).toBeUndefined();
+    expect((manager as any).buildThreadSessionOptions(selected.id, selected).codex.networkAccessEnabled).toBe(true);
+    expect((manager as any).buildThreadSessionOptions(other.id, other).codex.networkAccessEnabled).toBe(false);
+  });
+});
+
 // ─── approve path ─────────────────────────────────────────────────────────────
 
 describe('pendingPlan — approve clears it', () => {

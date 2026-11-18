@@ -3195,6 +3195,14 @@ export class ThreadsView extends ItemView {
           })),
         }],
       },
+      ...(harness === 'codex' && !thread.remote ? [{
+        id: 'codex-network-access', label: 'Network access', icon: 'globe',
+        value: thread.codexNetworkAccessEnabled === true ? 'On' : 'Off',
+        groups: [{ note: 'Allow this Codex thread to reach the network while keeping its filesystem sandbox. Plan mode still denies network access.', options: [
+          { label: 'Off', checked: thread.codexNetworkAccessEnabled !== true, onSelect: () => this.applyThreadCodexNetworkAccess(threadId, false) },
+          { label: 'On', checked: thread.codexNetworkAccessEnabled === true, onSelect: () => this.applyThreadCodexNetworkAccess(threadId, true) },
+        ] }],
+      }] : []),
       { id: 'harness', label: 'Harness', icon: 'bot', value: harnessValue, groups: harnessGroups },
       ...(runOnSetting ? [runOnSetting] : []),
     ];
@@ -3362,6 +3370,17 @@ export class ThreadsView extends ItemView {
     mode: import('./types').PluginSettings['permissionMode'] | undefined,
   ): Promise<void> {
     this.manager.setThreadPermissionMode(threadId, mode);
+    await this.plugin.saveSettings();
+    this.renderThreadInfo();
+  }
+
+  private async applyThreadCodexNetworkAccess(threadId: string, enabled: boolean): Promise<void> {
+    try {
+      await this.manager.setThreadCodexNetworkAccess(threadId, enabled);
+    } catch (error) {
+      new Notice(`Could not change Codex network access: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     await this.plugin.saveSettings();
     this.renderThreadInfo();
   }

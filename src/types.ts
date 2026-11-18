@@ -670,6 +670,8 @@ export interface Thread {
    * global settings.permissionMode for sessions in this thread.
    */
   permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
+  /** Explicit Codex network access for this thread. Absent means off. */
+  codexNetworkAccessEnabled?: boolean;
   /**
    * Plan text from a pending ExitPlanMode call that hasn't been approved or
    * rejected yet. Persisted so the plan card can be restored after a reload

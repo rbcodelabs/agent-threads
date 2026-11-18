@@ -24,6 +24,8 @@ New threads use the harness selected in **Settings → Agent → Agent harness**
 
 OpenCode permission modes are applied live by Agent Threads: read-only tools (read, glob, grep, list) always run; **Accept edits** auto-approves file edits; **Bypass**/**Auto** approve everything; **Don't ask** denies anything that would prompt (so scheduled runs never stall); **Plan** uses OpenCode's read-only `plan` agent and refuses edits.
 
+Codex threads have a separate **Network access** choice in the footer settings. It is off for new and existing threads until enabled on that thread. The choice is saved and applied before the first turn of a resumed session. Changing **Permissions** does not turn networking on; Plan mode keeps it off even for an opted-in thread. The filesystem sandbox remains in place when networking is on.
+
 Codex JSONL logs compact repetitive protocol updates automatically. Completed items (including command output and plans) are preserved unchanged. The latest diff snapshot per thread/turn is kept; snapshots larger than 512 KiB retain a UTF-8 tail with explicit omission counts. Command-output and plan deltas retain at most 64 KiB per item until completion; when all streamed bytes fit and the completed output contains them, the duplicate is discarded. Otherwise a `codex/log/compacted` diagnostic records the tail, source event, original/retained/omitted byte counts, and flush reason. Pending payload is limited to 4 MiB and 128 entries; older entries flush when either limit is reached. Pending events also flush at turn completion and session close/process exit or error. An abrupt host crash can lose pending buffers. This reduces redundant logging but is not a hard file-size cap, and existing logs are not rewritten.
 
 Harness-native skills and sub-agents use their respective CLI's definitions and event protocol; they are presented through the same slash-command and task UI where the protocols expose equivalent data.
@@ -809,4 +811,3 @@ Run **Agent Threads: Generate diagnostics report** from the command palette (or 
 The report is redacted by construction: it never includes message or file contents, absolute paths are collapsed to `~` or reduced to a basename (so no username or private directory layout leaks), and obvious `SECRET=value` strings are stripped. On mobile the command shows a "desktop only" Notice and does nothing.
 
 You can turn the whole layer off with the **Diagnostics** toggle in Settings → General (it's on by default, which is safe because everything stays local); turning it off stops the sampler and freezes the counters.
-

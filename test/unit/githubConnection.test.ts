@@ -525,6 +525,21 @@ describe('container credential commands', () => {
 // ── Host delivery ─────────────────────────────────────────────────────────────
 
 describe('host env construction', () => {
+  it('retains the wrapper first and includes common macOS gh locations with a minimal host PATH', () => {
+    const env = buildHostGitEnv({ dir: '/rt', baseEnv: { PATH: '/usr/bin' } });
+    expect(env.PATH?.split(':').slice(0, 4)).toEqual(['/rt/bin', '/usr/bin', '/opt/homebrew/bin', '/usr/local/bin']);
+  });
+  it.skipIf(process.platform !== 'darwin' || !fs.existsSync('/opt/homebrew/bin/gh'))('runs the Homebrew gh through the host wrapper from launchd-style PATH', () => {
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'bin'));
+    fs.writeFileSync(path.join(dir, 'bin', 'gh'), buildGhWrapperScript(dir, true), { mode: 0o700 });
+    const env = buildHostGitEnv({ dir, baseEnv: { PATH: '/usr/bin:/bin' } });
+    const result = spawnSync('/bin/sh', ['-c', 'gh --version'], {
+      encoding: 'utf8', env: { PATH: env.PATH },
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('gh version');
+  });
   it('appends after existing GIT_CONFIG entries and prefixes PATH', () => {
     const env = buildHostGitEnv({
       dir: '/rt',
@@ -536,7 +551,7 @@ describe('host env construction', () => {
     expect(env.GIT_CONFIG_VALUE_2).toBe(`/rt/${GIT_HELPER_NAME}`);
     expect(env.GIT_CONFIG_KEY_3).toBe('user.name');
     expect(env.GIT_CONFIG_KEY_4).toBe('user.email');
-    expect(env.PATH).toBe('/rt/bin:/usr/bin');
+    expect(env.PATH).toBe('/rt/bin:/usr/bin:/opt/homebrew/bin:/usr/local/bin');
     expect(env.GIT_CONFIG_KEY_0).toBeUndefined(); // existing entries untouched
   });
 

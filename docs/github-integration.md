@@ -7,6 +7,15 @@ personal access token is needed. This works on the host and on the managed
 started with **Run on: This Mac (container)**). On Obsidian, or on a Geode without
 the GitHub connection, nothing changes and your own credentials keep working.
 
+For a local Codex thread, enable **Network access** in that thread's footer
+settings before running `gh` or `git` against GitHub. This is off by default,
+independent of **Permissions**; even **Bypass all permissions** does not grant
+network access. Plan mode always denies network access. The in-app browser and
+Geode GitHub tools use the host connection and can work while Codex's shell
+network remains disabled. On macOS, use a non-login shell for `gh` so the Geode
+credential wrapper stays first on PATH; a login shell may reorder PATH and use
+your separate CLI login instead.
+
 ## Setup
 
 1. In Geode, open **Settings → GitHub** and choose **Connect** (device flow).
@@ -141,4 +150,3 @@ pushed credential still takes precedence. If neither exists and `gh auth status`
 sessions show a one-time notice: "GitHub auth unavailable in the daemon: push/PR commands
 will fail." Note the environment is read when a session starts, so an already-running
 session does not pick up a token that appears later.
-
