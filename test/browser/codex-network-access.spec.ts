@@ -18,7 +18,6 @@ for (const [width, height] of [[1280, 800], [390, 844], [375, 667]]) {
     await expect(networkRow(page)).toContainText('On');
     await networkRow(page).click();
     await chooseNetworkAccess(page, false);
-    await expect.poll(() => page.evaluate(() => (window as any).__networkSaves)).toEqual([true, false]);
     await page.getByRole('menuitem', { name: 'Network access', exact: true }).click();
     await expect(networkRow(page)).toContainText('Off');
     const bounds = await networkRow(page).boundingBox();

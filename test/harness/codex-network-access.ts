@@ -27,8 +27,12 @@ export async function openCodexNetworkSettings(page: Page, width = 1280, height 
 }
 
 export async function chooseNetworkAccess(page: Page, enabled: boolean): Promise<void> {
+  const savesBeforeChoice = await page.evaluate(() => (window as any).__networkSaves.length as number);
   await page.getByRole('menuitemradio', { name: enabled ? 'On' : 'Off', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__manager.getThread('thread-fix-auth').codexNetworkAccessEnabled)).toBe(enabled);
+  // Focusing threads and other view updates also save settings. Require this
+  // choice to reach persistence without imposing a count on unrelated saves.
+  await expect.poll(() => page.evaluate((start) => (window as any).__networkSaves.slice(start), savesBeforeChoice)).toContain(enabled);
   await expect(networkRow(page)).toContainText(enabled ? 'On' : 'Off');
   await networkRow(page).click();
   await expect(page.getByRole('menuitemradio', { name: enabled ? 'On' : 'Off', exact: true })).toHaveAttribute('aria-checked', 'true');
