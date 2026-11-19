@@ -99,6 +99,15 @@ shows whether the CLI is in the image and whether it is signed in (checked while
 Only the Claude token is a secret this plugin holds (the keychain, as before). Codex, OpenCode and Antigravity logins live
 only in the data volume, and the `localDaemon` settings carry just the toggles. **Reset daemon data** removes them with the volume.
 
+**Update Codex in the local daemon.** The Codex row shows the version measured inside the running container.
+If a newer reviewed Codex version is available, **Update harnesses** previews the installed and target versions.
+The action builds and checks the candidate with the current daemon image as its base, then replaces the container
+only when all turns and pending requests have finished. Reopen Settings to refresh a busy status. The daemon checks
+again immediately before replacement, and new session work waits while the replacement is verified. Your named
+volumes keep your sign-in, sessions and files. If the replacement fails, Agent Threads tries to restore the previous
+image. An older local daemon may need its regular **Update** first. See
+[Codex harness maintenance](codex-harness-maintenance.md) for the pin review workflow.
+
 **More folders.** Besides the vault: **Settings, Remote, Local daemon shared folders** lists host folders to share
 READ-WRITE at `/work/<folder name>` (for example a repository outside the vault; they appear under "Run on" as
 workspaces, labelled by their name on the Mac, such as "App - /work/app"), and Geode's connected external roots are mounted READ-ONLY at `/ext/<name>` and offered as read-only
@@ -183,9 +192,10 @@ and a token the daemon rejected (a new one is created) each have their own messa
 
 **Not in this version:** exposing the daemon to other devices, stop-on-idle, network isolation modes (the agent inside needs
 the network to reach Claude), and write/scheduling host tools for daemon threads (policy, see above).
-Old per-toggle image tags are not garbage-collected until Remove (they only cost disk). The harness CLIs are installed from npm without a lockfile (`CODEX_VERSION` defaults to `latest`, `OPENCODE_VERSION` to the
-version the adapter is verified against); the OpenCode install explicitly allows only `opencode-ai`'s postinstall for npm
-versions that block install scripts, and the build fails if either CLI is not runnable.
+Old per-toggle image tags are retained for the current daemon version. The Codex CLI uses the exact release in
+[`sandbox/codex-version.json`](../sandbox/codex-version.json), and npm resolves its platform package at that version.
+OpenCode keeps its verified adapter version and its npm install allows only `opencode-ai`'s postinstall on npm versions
+that block install scripts. The build verifies the installed Codex version and checks that other enabled CLIs run.
 
 Troubleshooting: the runtime ships with the plugin and is not on your `PATH`; the CLI is at
 `~/Library/Application Support/claude-threads/runtime/<version>/bin/container` (`container ls -a` shows
@@ -359,7 +369,7 @@ docker build -f sandbox/Dockerfile.daemon \
 
 **Codex and OpenCode in the image.** A separate, opt-in `with-harnesses` stage, declared before `with-claude` so the default
 target (and the Claude layer the app builds) is unchanged. Build it with `--target with-harnesses` and
-`--build-arg INSTALL_CODEX=1` (npm `@openai/codex`, `CODEX_VERSION`, default `latest`) and/or `--build-arg INSTALL_OPENCODE=1`
+`--build-arg INSTALL_CODEX=1` (npm `@openai/codex`, default pin from `sandbox/codex-version.json`, optional exact `CODEX_VERSION` override) and/or `--build-arg INSTALL_OPENCODE=1`
 (npm `opencode-ai`, `OPENCODE_VERSION`, default the version the adapter is verified against); add
 `--build-arg BASE_IMAGE=ghcr.io/...:<version>` to start from the published image. For all three, layer Claude on top by
 building the default target with `--build-arg BASE_IMAGE=<the with-harnesses image>`. The CLIs install into

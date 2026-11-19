@@ -14,6 +14,7 @@ import {
 import { parseAntigravityLogin, parseDeviceLogin, parseHarnessProbe } from '../../src/localDaemon/parse';
 import { LocalDaemonError } from '../../src/localDaemon/provision';
 import {
+  CODEX_VERSION,
   THIN_DOCKERFILE,
   WITH_CLAUDE_STAGE_BODY,
   WITH_HARNESSES_STAGE_BODY,
@@ -346,13 +347,13 @@ describe('harness rows in the panel view', () => {
   it('shows CLI present / signed in per harness from the probe', () => {
     const r = rows({ harnessProbe: probe(true) });
     expect(row(r, 'claude')).toMatchObject({ enabled: true, status: 'CLI installed, signed in', tone: 'ok' });
-    expect(row(r, 'codex')).toMatchObject({ status: 'CLI installed, signed in', tone: 'ok' });
+    expect(row(r, 'codex')).toMatchObject({ status: 'CLI installed, signed in (version unknown)', tone: 'ok' });
     expect(row(r, 'codex').signIn).toBeUndefined();
   });
 
   it('missing Codex and Antigravity logins get a Sign in button and the manual line; OpenCode gets the line only', () => {
     const r = rows({ harnessProbe: probe(false, false) });
-    expect(row(r, 'codex')).toMatchObject({ status: 'CLI installed, not signed in', tone: 'warn', signIn: 'codex' });
+    expect(row(r, 'codex')).toMatchObject({ status: 'CLI installed, not signed in (version unknown)', tone: 'warn', signIn: 'codex' });
     expect(row(r, 'codex').command).toContain('/opt/harnesses/bin/codex login --device-auth');
     expect(row(r, 'antigravity')).toMatchObject({ status: 'CLI installed, not signed in', tone: 'warn', signIn: 'antigravity' });
     expect(row(r, 'antigravity').command).toContain('/opt/harnesses/bin/agy acp --login');
@@ -502,7 +503,7 @@ describe('controller: per-harness state and sign-in', () => {
     let snap1 = await h.controller.snapshot();
     expect(snap1.observed.harnessProbe).toEqual({
       claude: { cli: true, signedIn: false },
-      codex: { cli: true, signedIn: false },
+      codex: { cli: true, signedIn: false, version: CODEX_VERSION },
       opencode: { cli: true, signedIn: false },
       antigravity: { cli: false, signedIn: false },
     });
@@ -511,7 +512,7 @@ describe('controller: per-harness state and sign-in', () => {
     expect(snap1.observed.harnessProbe?.codex.signedIn).toBe(true);
     expect(snap1.containerName).toBe(h.name);
     const rows = buildHarnessRows(snap1);
-    expect(rows.find((r) => r.id === 'codex')!.status).toBe('CLI installed, signed in');
+    expect(rows.find((r) => r.id === 'codex')!.status).toBe(`CLI installed, signed in (Codex ${CODEX_VERSION})`);
     expect(rows.find((r) => r.id === 'opencode')!.command).toContain(h.name);
   });
 

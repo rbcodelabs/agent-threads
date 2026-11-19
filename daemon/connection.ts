@@ -18,6 +18,7 @@
  * wrapped, a reply that cannot be serialized becomes an `internal` error, and
  * an unexpected throw closes only that connection.
  */
+import type { LocalHarnessMaintenance } from './localHarnessMaintenance';
 import type { IncomingMessage } from 'node:http';
 import type { RawData, WebSocket } from 'ws';
 import {
@@ -113,6 +114,7 @@ export const DEFAULT_TIMINGS: Timings = {
 };
 
 export interface ServerContext {
+  harnessMaintenance?: LocalHarnessMaintenance;
   host: ThreadHost;
   tokens: TokenStore;
   throttle: FailureThrottle;
@@ -410,10 +412,20 @@ export class Connection {
       const running = this.ctx.cmdCache.pending(this.cacheScope(auth), frame.cmdId);
       if (running) { void running.then((reply) => this.guarded('reply', () => this.queueControl(encodeFrame(reply)))); return; }
     }
+    let finish: (() => void) | undefined;
+    if (this.ctx.harnessMaintenance && need !== 'read' && frame.type !== 'ack') {
+      finish = this.ctx.harnessMaintenance.begin();
+      if (!finish) {
+        // A paused command was never admitted. Let the client retry the same id after maintenance.
+        this.queueControl(this.err(frame.cmdId, 'conflict', 'The local daemon is updating its Codex harness. Retry when the update finishes.'));
+        return;
+      }
+    }
     let outcome: unknown;
     try {
       outcome = this.dispatch(frame, auth);
     } catch (e) {
+      finish?.();
       this.reply(frame, auth, cacheable, this.toErr(frame.cmdId, e));
       return;
     }
@@ -421,11 +433,12 @@ export class Connection {
       const settled: Promise<AckFrame | ErrFrame> = outcome.then(
         (result): AckFrame => ({ v: PROTOCOL_VERSION, type: 'ack', cmdId: frame.cmdId, result }),
         (e): ErrFrame => this.toErr(frame.cmdId, e),
-      );
+      ).finally(finish);
       if (cacheable) this.ctx.cmdCache.track(this.cacheScope(auth), frame.cmdId, settled);
       void settled.then((reply) => this.guarded('reply', () => this.reply(frame, auth, false, reply)));
       return;
     }
+    finish?.();
     this.reply(frame, auth, cacheable, { v: PROTOCOL_VERSION, type: 'ack', cmdId: frame.cmdId, result: outcome });
   }
 

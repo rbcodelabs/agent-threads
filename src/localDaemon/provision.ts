@@ -10,6 +10,7 @@
  * kept out of every message.
  */
 
+import codexPin from '../../sandbox/codex-version.json';
 import { VM_LIFECYCLE_TIMEOUT_MS, type VmCommandResult, type VmCommandRunner } from '../containerCli';
 import {
   BUILD_TIMEOUT_MS,
@@ -18,6 +19,8 @@ import {
   LOCAL_TOKEN_NAME,
   VERIFY_OK_MARKER,
   HARNESS_CLI_EXE,
+  CODEX_BINARY_IN_IMAGE,
+  CODEX_VERSION,
   thinDockerfileFor,
   harnessProbeArgs,
   normalizeHarnesses,
@@ -133,6 +136,19 @@ export async function imagePresent(d: StepDeps, ref: string): Promise<boolean> {
   return (await run(d, imageInspectArgs(ref), SHORT_TIMEOUT_MS)).exitCode === 0;
 }
 
+/** The same OCI index digest is reported by container inspect and image inspect on Apple container. */
+export async function imageDigest(d: StepDeps, ref: string): Promise<string | undefined> {
+  const result = await run(d, imageInspectArgs(ref), SHORT_TIMEOUT_MS);
+  if (result.exitCode !== 0) return undefined;
+  try {
+    const images = JSON.parse(result.stdout) as Array<{ configuration?: { descriptor?: { digest?: unknown } } }>;
+    const digest = images[0]?.configuration?.descriptor?.digest;
+    return typeof digest === 'string' ? digest : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function volumesPresent(d: StepDeps, vaultPath: string): Promise<boolean> {
   for (const name of [dataVolumeFor(vaultPath), workspacesVolumeFor(vaultPath)]) {
     if ((await run(d, volumeInspectArgs(name), SHORT_TIMEOUT_MS)).exitCode !== 0) return false;
@@ -190,8 +206,17 @@ function installNote(harnesses?: readonly string[]): string {
   return `installs ${parts.join(', ')}`;
 }
 
-export async function buildThinImage(d: StepDeps, version: string, harnesses?: readonly string[]): Promise<void> {
-  d.report?.(`Building ${localImageRef(version, harnesses)} (${installNote(harnesses)})`);
+const CODEX_REFRESH_DOCKERFILE = `ARG BASE_IMAGE
+FROM \${BASE_IMAGE}
+ARG CODEX_VERSION
+RUN npm install --global --ignore-scripts --no-audit --no-fund --prefix /opt/harnesses @openai/codex@\${CODEX_VERSION} && ${CODEX_BINARY_IN_IMAGE} --version | grep -Fx "codex-cli $CODEX_VERSION"
+`;
+
+export async function buildThinImage(
+  d: StepDeps, version: string, harnesses?: readonly string[], refresh?: { previousImage: string; image: string },
+): Promise<void> {
+  const note = refresh ? `installs Codex ${CODEX_VERSION}` : installNote(harnesses);
+  d.report?.(`Building ${refresh?.image ?? localImageRef(version, harnesses)} (${note})`);
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const fs = require('fs/promises') as typeof import('fs/promises');
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -202,15 +227,23 @@ export async function buildThinImage(d: StepDeps, version: string, harnesses?: r
   try {
     try {
       dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-threads-daemon-build-'));
-      await fs.writeFile(path.join(dir, 'Dockerfile'), thinDockerfileFor(harnesses), 'utf8');
+      const contextPin = path.join(dir, 'sandbox');
+      await fs.mkdir(contextPin);
+      await fs.writeFile(path.join(contextPin, 'codex-version.json'), JSON.stringify(codexPin), 'utf8');
+      await fs.writeFile(path.join(dir, 'Dockerfile'), refresh ? CODEX_REFRESH_DOCKERFILE : thinDockerfileFor(harnesses), 'utf8');
     } catch (err) {
       throw new LocalDaemonError('build', `Writing the daemon Dockerfile failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const r = await run(d, buildThinImageArgs({ version, dockerfilePath: path.join(dir, 'Dockerfile'), contextDir: dir, harnesses }), BUILD_TIMEOUT_MS, { chatty: true });
+    const dockerfilePath = path.join(dir, 'Dockerfile');
+    const args = refresh ? [
+      'build', '--tag', refresh.image, '--build-arg', `BASE_IMAGE=${refresh.previousImage}`,
+      '--build-arg', `CODEX_VERSION=${CODEX_VERSION}`, '--progress', 'plain', '-f', dockerfilePath, dir,
+    ] : buildThinImageArgs({ version, dockerfilePath, contextDir: dir, harnesses });
+    const r = await run(d, args, BUILD_TIMEOUT_MS, { chatty: true });
     if (r.exitCode !== 0) {
       const kind = classifyPullError(text(r));
       if (kind === 'disk') throw new LocalDaemonError('disk', describePullFailure('disk', publishedImageRef(version), version), tail(text(r)));
-      throw failed('build', `Adding the agent CLIs to the daemon image (${installNote(harnesses)})`, r);
+      throw failed('build', `Adding the agent CLIs to the daemon image (${note})`, r);
     }
   } finally {
     if (dir) await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
@@ -220,10 +253,12 @@ export async function buildThinImage(d: StepDeps, version: string, harnesses?: r
   }
 }
 
-export async function verifyThinImage(d: StepDeps, version: string, harnesses?: readonly string[]): Promise<void> {
-  const r = await run(d, verifyImageArgs(version, harnesses), 60_000);
+export async function verifyThinImage(d: StepDeps, version: string, harnesses?: readonly string[], image?: string): Promise<void> {
+  const r = await run(d, verifyImageArgs(version, harnesses, image), 60_000);
   if (r.exitCode !== 0 || !r.stdout.includes(VERIFY_OK_MARKER)) {
-    throw failed('verify', `${localImageRef(version, harnesses)} was built but is missing ${[...normalizeHarnesses(harnesses).map((h) => HARNESS_CLI_EXE[h]), 'agent-threads', 'git'].join(', ')};`, r);
+    throw failed('verify', image
+      ? `${image} did not report Codex ${CODEX_VERSION} with all enabled harnesses`
+      : `${localImageRef(version, harnesses)} was built but is missing ${[...normalizeHarnesses(harnesses).map((h) => HARNESS_CLI_EXE[h]), 'agent-threads', 'git'].join(', ')};`, r);
   }
 }
 
@@ -262,13 +297,13 @@ export async function removeVolumes(d: StepDeps, vaultPath: string): Promise<voi
  */
 export async function prepareVolumes(
   d: StepDeps,
-  opts: { vaultPath: string; version: string; credential?: string; harnesses?: readonly string[] },
+  opts: { vaultPath: string; version: string; credential?: string; harnesses?: readonly string[]; image?: string },
 ): Promise<void> {
   const withCredential = !!opts.credential;
   d.report?.(withCredential ? 'Preparing the data volume and writing the Claude credential' : 'Preparing the data volume');
   const r = await run(
     d,
-    prepareArgs({ vaultPath: opts.vaultPath, version: opts.version, withCredential, harnesses: opts.harnesses }),
+    prepareArgs({ ...opts, withCredential }),
     VM_LIFECYCLE_TIMEOUT_MS,
     withCredential ? { input: opts.credential } : {},
   );

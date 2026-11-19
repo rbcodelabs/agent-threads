@@ -16,9 +16,9 @@ import type { LocalDaemonSettings, RemoteDaemonConfig } from '../../src/types';
 import type { ProbeResult } from '../../src/remote/DaemonClient';
 
 export interface FakeState {
-  images: Record<string, { published?: boolean; built?: boolean; harnesses?: string[] }>;
+  images: Record<string, { published?: boolean; built?: boolean; harnesses?: string[]; codexVersion?: string }>;
   volumes: Record<string, { owner: number; credential?: string; auth?: Record<string, boolean>; tokens?: Array<{ id: string; name: string; token: string; revokedAt: number | null }> }>;
-  containers: Record<string, { state: 'running' | 'stopped'; bootLog?: string[]; labels: Record<string, string>; hostPort: number; volumes: string[]; env: string[]; cmd: string[]; publish: string }>;
+  containers: Record<string, { state: 'running' | 'stopped'; bootLog?: string[]; labels: Record<string, string>; hostPort: number; volumes: string[]; env: string[]; cmd: string[]; publish: string; image?: string }>;
   calls: string[][];
   portsTaken?: number[];
   unhealthy?: boolean;

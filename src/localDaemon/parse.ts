@@ -11,6 +11,7 @@ export type ContainerState = 'running' | 'stopped' | 'unknown';
 export interface InspectedContainer {
   state: ContainerState;
   labels: Record<string, string>;
+  image?: { reference: string; digest: string };
 }
 
 /** SIGKILL (128 + 9): what the kernel OOM killer, `container kill` and an expired `stop` timeout all produce. */
@@ -71,7 +72,12 @@ export function parseInspectedContainer(stdout: string): InspectedContainer | nu
     ?? entry.state ?? (entry.State as Record<string, unknown> | undefined)?.Status;
   const text = typeof raw === 'string' ? raw.toLowerCase() : '';
   const state: ContainerState = text === 'running' ? 'running' : text ? 'stopped' : 'unknown';
-  return { state, labels: parseContainerLabels(stdout) ?? {} };
+  const configuredImage = (entry.configuration as { image?: { reference?: unknown; descriptor?: { digest?: unknown } } } | undefined)?.image;
+  const reference = configuredImage?.reference;
+  const digest = configuredImage?.descriptor?.digest;
+  const image = typeof reference === 'string' && typeof digest === 'string' && /^sha256:[a-f0-9]{64}$/.test(digest)
+    ? { reference, digest } : undefined;
+  return { state, labels: parseContainerLabels(stdout) ?? {}, ...(image ? { image } : {}) };
 }
 
 export interface CreatedToken {
@@ -175,6 +181,8 @@ export interface HarnessProbe {
   cli: boolean;
   /** A login left a credential file in the persisted HOME (Claude is not probed here: see `credentialInVolume`). */
   signedIn: boolean;
+  /** Version reported by the running CLI, when it can be measured. */
+  version?: string;
 }
 
 export type HarnessProbeResult = Partial<Record<'claude' | 'codex' | 'opencode' | 'antigravity', HarnessProbe>>;
@@ -183,7 +191,10 @@ export type HarnessProbeResult = Partial<Record<'claude' | 'codex' | 'opencode' 
 export function parseHarnessProbe(stdout: string): HarnessProbeResult | null {
   const out: HarnessProbeResult = {};
   let seen = false;
+  let codexVersion: string | undefined;
   for (const line of stdout.split('\n')) {
+    const version = /^codex\.version=codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/.exec(line.trim());
+    if (version) codexVersion = version[1];
     const m = /^(claude|codex|opencode|antigravity)\.(cli|auth)=([01])\s*$/.exec(line.trim());
     if (!m) continue;
     seen = true;
@@ -192,6 +203,7 @@ export function parseHarnessProbe(stdout: string): HarnessProbeResult | null {
     if (m[2] === 'cli') entry.cli = m[3] === '1'; else entry.signedIn = m[3] === '1';
     out[h] = entry;
   }
+  if (out.codex?.cli && codexVersion) out.codex.version = codexVersion;
   return seen ? out : null;
 }
 

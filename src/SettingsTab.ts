@@ -3743,7 +3743,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       signIn: (handlers) => controller.signIn(handlers),
       signInHarness: (harness, handlers) => controller.signInHarness(harness, handlers),
       setHarnesses: (harnesses) => controller.setHarnesses(harnesses),
-      run: (id, opts) => {
+      run: (id, opts, preview) => {
         switch (id) {
           case 'setup': return showAfter(() => controller.setUp(opts))();
           case 'start': return controller.start(opts);
@@ -3751,6 +3751,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           case 'restart': return controller.restart(opts);
           case 'kill': return controller.kill(opts);
           case 'update': return showAfter(() => controller.update(opts))();
+          case 'update-harnesses': return preview ? controller.updateHarnesses(preview, opts) : Promise.resolve();
           case 'reset': return controller.reset(opts);
           case 'remove': return showAfter(() => controller.remove({ ...opts, removeData: true }))();
         }

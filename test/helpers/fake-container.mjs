@@ -5,6 +5,7 @@
 // Failure injection: FAKE_CONTAINER_FAIL is a comma list of
 //   pull:denied | pull:404 | pull:network | build | run:port-in-use | run:name | exec:token | volume
 // and the state file can carry flags (state.unhealthy, state.eaccess) set by a test.
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, readFileSync as read } from 'node:fs';
 
 const file = process.env.FAKE_CONTAINER_STATE;
@@ -33,10 +34,12 @@ function flagAll(name, list = args) {
 
 const [a, b] = args;
 
+const imageDigest = (ref) => `sha256:${createHash('sha256').update(ref).digest('hex')}`;
+
 if (a === 'image' && b === 'inspect') {
   const ref = args[2];
   if (!state.images[ref]) { err(`image ${ref} not found`); done(1); }
-  out(JSON.stringify([{ id: `sha256:${ref}`, variants: [] }]));
+  out(JSON.stringify([{ configuration: { descriptor: { digest: imageDigest(ref) } }, variants: [] }]));
   done(0);
 }
 
@@ -75,7 +78,11 @@ if (a === 'build') {
   if (!state.images[base]) { err(`base image ${base} not found`); done(1); }
   const dockerfile = readFileSync(flag('-f'), 'utf8');
   if (!dockerfile.includes('FROM ${BASE_IMAGE}')) { err('Dockerfile does not use BASE_IMAGE'); done(1); }
-  state.images[flag('--tag')] = { built: true, label: flag('--label'), harnesses, buildArgs };
+  const refreshed = dockerfileText.includes('RUN npm install --global --ignore-scripts');
+  state.images[flag('--tag')] = {
+    built: true, label: flag('--label'), harnesses: refreshed ? state.images[base].harnesses : harnesses, buildArgs,
+    ...(buildArgs.CODEX_VERSION ? { codexVersion: buildArgs.CODEX_VERSION } : {}),
+  };
   out('build done');
   done(0);
 }
@@ -118,6 +125,7 @@ if (a === 'run') {
     done(0);
   }
   const name = flag('--name');
+  if (fails.has('run:codex-candidate') && image.includes('-codex-refresh-')) { err('candidate failed to start'); done(1); }
   if (fails.has('run:name') || state.containers[name]) { err(`container ${name} already exists`); done(1); }
   const publish = flag('-p') ?? '';
   const hostPort = Number(publish.split(':')[1]);
@@ -143,7 +151,7 @@ if (a === 'inspect') {
   const c = state.containers[args[1]];
   if (!c) { err('not found'); done(1); }
   // Real Apple `container` 1.5.0 shape: status is an object with NO exit code / OOM fields, even when stopped.
-  out(JSON.stringify([{ status: { networks: [], startedDate: '2026-10-22T01:09:11Z', state: c.state }, configuration: { id: args[1], labels: c.labels } }]));
+  out(JSON.stringify([{ status: { networks: [], startedDate: '2026-10-22T01:09:11Z', state: c.state }, configuration: { id: args[1], labels: c.labels, ...(c.image ? { image: { reference: c.image, descriptor: { digest: imageDigest(c.image) } } } : {}) } }]));
   done(0);
 }
 
@@ -195,6 +203,7 @@ if (a === 'exec') {
     const have = state.images[c.image]?.harnesses ?? ['claude'];
     if (fails.has('exec:probe')) { err('probe failed'); done(1); }
     for (const h of ['claude', 'codex', 'opencode', 'antigravity']) out(`${h}.cli=${have.includes(h) ? 1 : 0}`);
+    if (state.images[c.image]?.codexVersion) out(`codex.version=codex-cli ${state.images[c.image].codexVersion}`);
     for (const h of ['codex', 'opencode', 'antigravity']) out(`${h}.auth=${state.volumes[dataVol]?.auth?.[h] ? 1 : 0}`);
     done(0);
   }

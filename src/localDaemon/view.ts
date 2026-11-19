@@ -5,18 +5,19 @@
  */
 
 import { RUNTIME_PKG_BYTES } from '../sandboxRuntime';
-import type { LocalDaemonSnapshot } from './controller';
+import type { CodexUpdatePreview, LocalDaemonSnapshot } from './controller';
 import type { DegradedReason } from './assess';
 import { HARNESS_LABEL, LOCAL_HARNESSES, VAULT_GUEST_PATH, manualLoginCommand, normalizeHarnesses, type LocalHarness } from './spec';
 
 export type LocalDaemonButtonId =
-  | 'setup' | 'start' | 'stop' | 'restart' | 'reset' | 'update' | 'sign-in' | 'remove' | 'kill';
+  | 'setup' | 'start' | 'stop' | 'restart' | 'reset' | 'update' | 'update-harnesses' | 'sign-in' | 'remove' | 'kill';
 
 export interface LocalDaemonButton {
   id: LocalDaemonButtonId;
   label: string;
   cta?: boolean;
   danger?: boolean;
+  disabledReason?: string;
 }
 
 export type LocalDaemonTone = 'ok' | 'warn' | 'error' | 'muted';
@@ -91,10 +92,11 @@ export function buildHarnessRows(snap: LocalDaemonSnapshot): HarnessRow[] {
       return { ...base, status: running ? `CLI state unknown${known}` : `On; checked while the daemon runs${known}`, tone: 'muted' };
     }
     if (!probe.cli) return { ...base, status: 'CLI is not in the daemon image yet. Apply changes to rebuild it.', tone: 'warn' };
-    if (signedIn) return { ...base, status: 'CLI installed, signed in', tone: 'ok' };
+    const version = id === 'codex' ? (probe.version ? ` (Codex ${probe.version})` : ' (version unknown)') : '';
+    if (signedIn) return { ...base, status: `CLI installed, signed in${version}`, tone: 'ok' };
     if (id === 'claude') return { ...base, status: 'CLI installed, needs sign-in', tone: 'warn' };
     const command = manualLoginCommand(id, snap.containerName ?? 'agent-threads-local', snap.containerBinary);
-    if (id === 'codex') return { ...base, status: 'CLI installed, not signed in', tone: 'warn', signIn: 'codex', command };
+    if (id === 'codex') return { ...base, status: `CLI installed, not signed in${version}`, tone: 'warn', signIn: 'codex', command };
     if (id === 'antigravity') return { ...base, status: 'CLI installed, not signed in', tone: 'warn', signIn: 'antigravity', command };
     return { ...base, status: 'CLI installed, not signed in. OpenCode\'s login is an interactive provider picker, so run this in a terminal:', tone: 'warn', command };
   });
@@ -103,7 +105,21 @@ export function buildHarnessRows(snap: LocalDaemonSnapshot): HarnessRow[] {
 export function buildLocalDaemonView(snap: LocalDaemonSnapshot): LocalDaemonView {
   const view = buildViewCore(snap);
   const hide = view.busy || snap.assessment.status === 'unsupported' || snap.assessment.status === 'conflict';
-  return { ...view, harnessRows: hide ? [] : buildHarnessRows(snap) };
+  const update = snap.codexUpdate;
+  const disabledReason = update && update.availability !== 'idle' ? {
+    busy: 'Wait for the daemon to finish active work and pending requests, then reopen these settings.',
+    unsupported: 'Update the local daemon before updating its Codex harness.',
+    unknown: 'Could not verify that the local daemon is idle.',
+  }[update.availability] : undefined;
+  const buttons = update && !hide ? [
+    ...view.buttons,
+    { id: 'update-harnesses' as const, label: 'Update harnesses', ...(disabledReason ? { disabledReason } : {}) },
+  ] : view.buttons;
+  return { ...view, buttons, harnessRows: hide ? [] : buildHarnessRows(snap) };
+}
+
+export function describeCodexUpdate(update: CodexUpdatePreview): string {
+  return `Update Codex from ${update.from} to ${update.to}? The daemon must be idle. The update keeps your sign-ins, sessions and files, and tries to restore the previous image if the replacement fails.`;
 }
 
 function buildViewCore(snap: LocalDaemonSnapshot): Omit<LocalDaemonView, 'harnessRows'> & { harnessRows?: HarnessRow[] } {
