@@ -10,13 +10,13 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 
-export function assertSmokeTurn(frames, expectedText) {
+export function assertSmokeTurn(frames, expectedText, label = 'Codex') {
   const error = frames.find((frame) => frame.type === 'event' && frame.name === 'onError');
-  assert.ok(!error, `Codex turn failed: ${JSON.stringify(error?.args)}`);
+  assert.ok(!error, `${label} turn failed: ${JSON.stringify(error?.args)}`);
   const events = frames.filter((frame) => frame.type === 'event');
   const done = events.find((frame) => frame.name === 'onDone');
   const nativeId = done?.args?.[0];
-  assert.ok(typeof nativeId === 'string' && nativeId, 'completed turn must include a native Codex session ID');
+  assert.ok(typeof nativeId === 'string' && nativeId, `completed turn must include a native ${label} session ID`);
   const streamedText = events.filter((frame) => frame.name === 'onToken').map((frame) => frame.args[0]).join('');
   assert.equal(streamedText, expectedText, 'daemon must stream the model fixture response');
   return nativeId;
@@ -61,7 +61,7 @@ function startModelFixture(turns, requests) {
   }).listen(0, '127.0.0.1');
 }
 
-async function waitFor(read, description) {
+export async function waitFor(read, description) {
   const deadline = Date.now() + 25_000;
   do {
     const result = read();
@@ -71,7 +71,7 @@ async function waitFor(read, description) {
   throw new Error(`Timed out waiting for ${description}.`);
 }
 
-async function exerciseDaemon(port, token, workspace, turns) {
+export async function exerciseDaemon(port, token, workspace, turns, { harness = 'codex', model: requestedModel = model } = {}) {
   const baseUrl = `127.0.0.1:${port}`;
   const health = await fetch(`http://${baseUrl}/healthz`, { signal: AbortSignal.timeout(5000) });
   assert.equal(health.status, 200);
@@ -96,19 +96,19 @@ async function exerciseDaemon(port, token, workspace, turns) {
 
   try {
     const welcome = await command('hello', { protocol: 1, client: 'cli', clientVersion: 'smoke', token }, 'welcome');
-    assert.ok(welcome.capabilities.includes('harness.codex'), 'candidate daemon must advertise Codex');
-    await command('session.open', { threadId, spec: { cwd: workspace, harness: 'codex', model, permissionMode: 'default', extraEnvRaw: '' } });
+    assert.ok(welcome.capabilities.includes(`harness.${harness}`), `candidate daemon must advertise ${harness}`);
+    await command('session.open', { threadId, spec: { cwd: workspace, harness, model: requestedModel, permissionMode: 'default', extraEnvRaw: '' } });
     await command('attach', { ch: `t:${threadId}`, afterSeq: 0 });
     const sessionIds = [];
     for (const turn of turns) {
       const from = frames.length;
       await command('session.send', { threadId, text: turn.prompt, userMessageUuid: randomUUID() });
-      await waitFor(() => frames.slice(from).find((frame) => frame.type === 'event' && ['onDone', 'onError'].includes(frame.name)), 'Codex turn completion');
-      sessionIds.push(assertSmokeTurn(frames.slice(from), turn.reply));
+      await waitFor(() => frames.slice(from).find((frame) => frame.type === 'event' && ['onDone', 'onError'].includes(frame.name)), `${harness} turn completion`);
+      sessionIds.push(assertSmokeTurn(frames.slice(from), turn.reply, harness));
       await command('session.close', { threadId });
     }
-    assert.equal(sessionIds[0], sessionIds[1], 'cold resume must retain the native Codex session ID');
-    console.log('PASS candidate daemon health, Codex start, streamed turn, and cold resume');
+    assert.equal(sessionIds[0], sessionIds[1], `cold resume must retain the native ${harness} session ID`);
+    console.log(`PASS candidate daemon health, ${harness} start, streamed turn, and cold resume`);
   } finally {
     ws.close();
   }

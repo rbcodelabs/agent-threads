@@ -6,6 +6,8 @@ on:
       - sandbox/harness-versions.json
       - sandbox/Dockerfile.daemon
       - scripts/managed-harness-versions.mjs
+      - scripts/claude-candidate-smoke.mjs
+      - scripts/codex-candidate-smoke.mjs
       - test/integration/managed-harness-versions.test.mjs
       - .github/workflows/managed-harness-candidate.yml
   workflow_dispatch:
@@ -36,8 +38,13 @@ jobs:
       - run: node --test test/integration/managed-harness-versions.test.mjs
       - run: docker build -f sandbox/Dockerfile.daemon -t candidate-claude .
       - run: docker build -f sandbox/Dockerfile.daemon --target with-harnesses --build-arg INSTALL_ANTIGRAVITY=1 -t candidate-agy .
-      - run: docker run --rm --entrypoint claude candidate-claude --version
+      - name: Stream and cold-resume with Claude Code
+        run: |
+          version="$(node -p "require('./sandbox/harness-versions.json').claude")"
+          docker run --rm --network none --entrypoint node \
+            --mount "type=bind,source=$PWD/scripts,target=/smoke,readonly" \
+            candidate-claude /smoke/claude-candidate-smoke.mjs "$version"
       - run: |
-          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' |
-            timeout 30 docker run --rm -i --entrypoint agy candidate-agy acp |
+          { printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}'; sleep 3; } |
+            timeout 30 docker run --rm --network none -i --entrypoint agy candidate-agy acp |
             jq -es 'any(.[]; .id == 1 and .result.protocolVersion == 1)'
