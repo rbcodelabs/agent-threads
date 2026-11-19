@@ -1,0 +1,43 @@
+name: Claude and Antigravity harness candidates
+
+on:
+  pull_request:
+    paths:
+      - sandbox/harness-versions.json
+      - sandbox/Dockerfile.daemon
+      - scripts/managed-harness-versions.mjs
+      - test/integration/managed-harness-versions.test.mjs
+      - .github/workflows/managed-harness-candidate.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: Claude and Antigravity binaries (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - run: node --test test/integration/managed-harness-versions.test.mjs
+      - run: docker build -f sandbox/Dockerfile.daemon -t candidate-claude .
+      - run: docker build -f sandbox/Dockerfile.daemon --target with-harnesses --build-arg INSTALL_ANTIGRAVITY=1 -t candidate-agy .
+      - run: docker run --rm --entrypoint claude candidate-claude --version
+      - run: |
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' |
+            timeout 30 docker run --rm -i --entrypoint agy candidate-agy acp |
+            jq -es 'any(.[]; .id == 1 and .result.protocolVersion == 1)'

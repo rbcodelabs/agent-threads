@@ -99,8 +99,9 @@ shows whether the CLI is in the image and whether it is signed in (checked while
 Only the Claude token is a secret this plugin holds (the keychain, as before). Codex, OpenCode and Antigravity logins live
 only in the data volume, and the `localDaemon` settings carry just the toggles. **Reset daemon data** removes them with the volume.
 
-**Update Codex in the local daemon.** The Codex row shows the version measured inside the running container.
-If a newer reviewed Codex version is available, **Update harnesses** previews the installed and target versions.
+**Update harnesses in the local daemon.** Claude Code, Antigravity and Codex show the versions measured inside
+the running container. If a measured version differs from its reviewed pin, **Update harnesses** previews the
+installed and target versions for the enabled managed harnesses.
 The action builds and checks the candidate with the current daemon image as its base, then replaces the container
 only when all turns and pending requests have finished. Reopen Settings to refresh a busy status. The daemon checks
 again immediately before replacement, and new session work waits while the replacement is verified. Your named
@@ -195,7 +196,7 @@ the network to reach Claude), and write/scheduling host tools for daemon threads
 Old per-toggle image tags are retained for the current daemon version. The Codex CLI uses the exact release in
 [`sandbox/codex-version.json`](../sandbox/codex-version.json), and npm resolves its platform package at that version.
 OpenCode keeps its verified adapter version and its npm install allows only `opencode-ai`'s postinstall on npm versions
-that block install scripts. The build verifies the installed Codex version and checks that other enabled CLIs run.
+that block install scripts. The build verifies the reviewed Claude Code, Antigravity and Codex versions for enabled harnesses.
 
 Troubleshooting: the runtime ships with the plugin and is not on your `PATH`; the CLI is at
 `~/Library/Application Support/claude-threads/runtime/<version>/bin/container` (`container ls -a` shows

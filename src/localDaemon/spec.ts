@@ -7,12 +7,23 @@
  * (`core-files.json`); a unit test pins that.
  */
 
+import harnessPins from '../../sandbox/harness-versions.json';
 import codexPin from '../../sandbox/codex-version.json';
 import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY } from '../containerCli';
 
 // ── Names, labels, ports ─────────────────────────────────────────────────────
 
 export const CODEX_VERSION = codexPin.version;
+
+export const MANAGED_HARNESS_TARGETS = {
+  claude: harnessPins.claude,
+  codex: CODEX_VERSION,
+  antigravity: harnessPins.antigravity.version,
+} as const;
+export type ManagedHarness = keyof typeof MANAGED_HARNESS_TARGETS;
+export function isManagedHarness(harness: LocalHarness): harness is ManagedHarness {
+  return Object.prototype.hasOwnProperty.call(MANAGED_HARNESS_TARGETS, harness);
+}
 
 export const DAEMON_IMAGE_REPOSITORY = 'ghcr.io/rbcodelabs/agent-threads-daemon';
 export const LOCAL_IMAGE_REPOSITORY = 'agent-threads-daemon-local';
@@ -209,9 +220,15 @@ export const WITH_CLAUDE_STAGE_BODY = `USER root
 # The Claude CLI goes OUTSIDE every VOLUME path. Under /var/lib/agent-threads/home it would be copied into a named
 # volume once and then frozen there across image upgrades (or hidden entirely by a bind mount). The login and the
 # sessions still live in the persisted HOME; only the program itself is part of the image.
+COPY sandbox/harness-versions.json /opt/agent-threads/harness-versions.json
 RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/claude
 USER agentthreads
-RUN curl -fsSL https://claude.ai/install.sh | HOME=/opt/claude bash
+RUN set -eu; \\
+    version="$(node -p "require('/opt/agent-threads/harness-versions.json').claude")"; \\
+    curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh; \\
+    HOME=/opt/claude bash /tmp/install-claude.sh "$version"; \\
+    rm /tmp/install-claude.sh; \\
+    /opt/claude/.local/bin/claude --version | grep -Fx "$version (Claude Code)"
 ENV PATH="/opt/claude/.local/bin:\${PATH}" \\
     DISABLE_AUTOUPDATER=1
 `;
@@ -229,30 +246,44 @@ ARG OPENCODE_VERSION=1.18.32
 USER root
 RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/harnesses /opt/harnesses/bin
 COPY sandbox/codex-version.json /opt/harnesses/codex-version.json
+COPY sandbox/harness-versions.json /opt/agent-threads/harness-versions.json
 USER agentthreads
 # opencode-ai fetches/links its platform binary in a postinstall script. npm 11 blocks dependency install scripts by
 # default (a silent skip leaves a launcher with no binary), so that one package is explicitly allowed; older npm
-# ignores the flag. Antigravity's installer runs with HOME=/opt/harnesses so staging and \`agy install\`'s duplicate copy
-# never touch the persisted HOME volume, and cleans them afterwards. The \`--version\` calls fail the build if any CLI
-# did not end up runnable.
+# ignores the flag.
 RUN set -eu; \\
     pkgs=""; \\
     if [ "$INSTALL_CODEX" = "1" ]; then CODEX_VERSION="\${CODEX_VERSION:-$(node -p "require('/opt/harnesses/codex-version.json').version")}"; echo "$CODEX_VERSION" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+$'; pkgs="$pkgs @openai/codex@\${CODEX_VERSION}"; fi; \\
     if [ "$INSTALL_OPENCODE" = "1" ]; then pkgs="$pkgs opencode-ai@\${OPENCODE_VERSION}"; fi; \\
     if [ -n "$pkgs" ]; then npm install --global --no-audit --no-fund --allow-scripts=opencode-ai --prefix /opt/harnesses $pkgs; fi; \\
-    if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then \\
-      HOME=/opt/harnesses curl -fsSL https://antigravity.google/cli/install.sh | HOME=/opt/harnesses bash -s -- --dir /opt/harnesses/bin; \\
-      rm -rf /opt/harnesses/.cache /opt/harnesses/.local /opt/harnesses/.gemini /opt/harnesses/.bashrc /opt/harnesses/.profile; \\
-    fi; \\
     if [ "$INSTALL_CODEX" = "1" ]; then /opt/harnesses/bin/codex --version | grep -Fx "codex-cli $CODEX_VERSION"; fi; \\
-    if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi; \\
-    if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then /opt/harnesses/bin/agy --version; fi
+    if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi
+USER root
+RUN set -eu; \\
+    if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then \\
+      case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) exit 1 ;; esac; \\
+      pins=/opt/agent-threads/harness-versions.json; \\
+      url="$(node -p "require('$pins').antigravity.artifacts.$arch.url")"; \\
+      hash="$(node -p "require('$pins').antigravity.artifacts.$arch.sha512")"; \\
+      curl -fsSL "$url" -o /tmp/agy.tar.gz; \\
+      printf '%s  /tmp/agy.tar.gz\\n' "$hash" | sha512sum -c -; \\
+      install -d -m 0755 /opt/antigravity; \\
+      tar -xOzf /tmp/agy.tar.gz antigravity > /opt/antigravity/agy; \\
+      chmod 0755 /opt/antigravity/agy; \\
+      ln -sfn /opt/antigravity/agy /opt/harnesses/bin/agy; \\
+      rm /tmp/agy.tar.gz; \\
+    fi
+USER agentthreads
+RUN if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then \\
+      version="$(node -p "require('/opt/agent-threads/harness-versions.json').antigravity.version")"; \\
+      /opt/antigravity/agy --version | grep -Ex "((agy|Antigravity|Version:) )?$version"; \\
+    fi
 ENV PATH="/opt/harnesses/bin:\${PATH}"
 `;
 
 /**
  * The thin layer for an enabled set: the published base, then the Codex/OpenCode/Antigravity CLIs if any is on, then
- * the Claude CLI if it is on. Claude-only is byte for byte what it was before harness toggles existed.
+ * the Claude CLI if it is on.
  */
 export function thinDockerfileFor(harnesses?: readonly string[]): string {
   const set = normalizeHarnesses(harnesses);
@@ -479,7 +510,9 @@ export function buildThinImageArgs(opts: { version: string; dockerfilePath: stri
 export function verifyImageArgs(version: string, harnesses?: readonly string[], image?: string): string[] {
   const set = normalizeHarnesses(harnesses);
   const checks = [...set.map((h) => `command -v ${HARNESS_CLI_EXE[h]}`), 'command -v agent-threads', 'command -v git'];
-  if (image) checks.push(`test "$(${CODEX_BINARY_IN_IMAGE} --version)" = 'codex-cli ${CODEX_VERSION}'`);
+  if (set.includes('codex')) checks.push(`test "$(${CODEX_BINARY_IN_IMAGE} --version)" = 'codex-cli ${CODEX_VERSION}'`);
+  if (set.includes('claude')) checks.push(`test "$(${CLAUDE_BINARY_IN_IMAGE} --version)" = '${MANAGED_HARNESS_TARGETS.claude} (Claude Code)'`);
+  if (set.includes('antigravity')) checks.push(`${ANTIGRAVITY_BINARY_IN_IMAGE} --version | grep -Ex '((agy|Antigravity|Version:) )?${MANAGED_HARNESS_TARGETS.antigravity.replace(/\./g, '[.]')}'`);
   return ['run', '--rm', '--entrypoint', 'sh', image ?? localImageRef(version, set), '-c', `${checks.join(' && ')} && echo LOCAL_DAEMON_IMAGE_OK`];
 }
 export const VERIFY_OK_MARKER = 'LOCAL_DAEMON_IMAGE_OK';
@@ -583,7 +616,7 @@ export function runArgs(spec: LocalDaemonSpec): string[] {
     '--cpus', String(spec.cpus),
     // A path, not a secret: where the daemon looks for `claude-token` (read once, at start).
     '--env', `CREDENTIALS_DIRECTORY=${CREDENTIALS_DIR}`,
-    ...(normalizeHarnesses(spec.harnesses).includes('codex') ? ['--env', 'AGENT_THREADS_LOCAL_HARNESS_MAINTENANCE=1'] : []),
+    ...(normalizeHarnesses(spec.harnesses).some(isManagedHarness) ? ['--env', 'AGENT_THREADS_LOCAL_HARNESS_MAINTENANCE=1'] : []),
     // The daemon's allowed set follows the toggles: a session for a harness that is off is refused at the door.
     '--env', `AGENT_THREADS_HARNESSES=${normalizeHarnesses(spec.harnesses).join(',')}`,
     // The container is this Mac's own sandbox, so the user decides here whether synced stdio servers may run in it.
@@ -686,9 +719,9 @@ const AS_DAEMON = (name: string): string[] => ['exec', '--user', String(DAEMON_U
 export const HARNESS_PROBE_SCRIPT = [
   `for p in claude:${CLAUDE_BINARY_IN_IMAGE} codex:${CODEX_BINARY_IN_IMAGE} opencode:${OPENCODE_BINARY_IN_IMAGE} antigravity:${ANTIGRAVITY_BINARY_IN_IMAGE}; do`,
   '  n="${p%%:*}"; f="${p#*:}"',
-  '  if [ -x "$f" ]; then echo "$n.cli=1"; else echo "$n.cli=0"; fi',
+  '  if [ -x "$f" ]; then echo "$n.cli=1"; else echo "$n.cli=0"; continue; fi',
+  '  case "$n" in claude|codex|antigravity) if v=$("$f" --version 2>/dev/null); then printf "%s.version=%s\\n" "$n" "$v"; fi ;; esac',
   'done',
-  `if [ -x ${CODEX_BINARY_IN_IMAGE} ] && v=$(${CODEX_BINARY_IN_IMAGE} --version 2>/dev/null); then printf 'codex.version=%s\\n' "$v"; fi`,
   `if [ -s ${CODEX_AUTH_FILE} ]; then echo codex.auth=1; else echo codex.auth=0; fi`,
   `if [ -s ${OPENCODE_AUTH_FILE} ]; then echo opencode.auth=1; else echo opencode.auth=0; fi`,
   `if [ -s ${ANTIGRAVITY_OAUTH_TOKEN_FILE} ] || [ -s ${ANTIGRAVITY_OAUTH_CREDS_FILE} ]; then echo antigravity.auth=1; else echo antigravity.auth=0; fi`,

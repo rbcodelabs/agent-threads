@@ -191,10 +191,19 @@ export type HarnessProbeResult = Partial<Record<'claude' | 'codex' | 'opencode' 
 export function parseHarnessProbe(stdout: string): HarnessProbeResult | null {
   const out: HarnessProbeResult = {};
   let seen = false;
-  let codexVersion: string | undefined;
+  const versions: Partial<Record<keyof HarnessProbeResult, string>> = {};
+  const patterns = {
+    claude: /^claude\.version=(\S+) \(Claude Code\)$/,
+    codex: /^codex\.version=codex-cli (\S+)$/,
+    antigravity: /^antigravity\.version=(?:(?:agy|Antigravity|Version:) )?(\S+)$/,
+  } as const;
   for (const line of stdout.split('\n')) {
-    const version = /^codex\.version=codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/.exec(line.trim());
-    if (version) codexVersion = version[1];
+    for (const harness of ['claude', 'codex', 'antigravity'] as const) {
+      const match = patterns[harness].exec(line.trim());
+      if (match && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(match[1])) {
+        versions[harness] = match[1];
+      }
+    }
     const m = /^(claude|codex|opencode|antigravity)\.(cli|auth)=([01])\s*$/.exec(line.trim());
     if (!m) continue;
     seen = true;
@@ -203,7 +212,10 @@ export function parseHarnessProbe(stdout: string): HarnessProbeResult | null {
     if (m[2] === 'cli') entry.cli = m[3] === '1'; else entry.signedIn = m[3] === '1';
     out[h] = entry;
   }
-  if (out.codex?.cli && codexVersion) out.codex.version = codexVersion;
+  for (const harness of ['claude', 'codex', 'antigravity'] as const) {
+    const entry = out[harness];
+    if (entry?.cli && versions[harness]) entry.version = versions[harness];
+  }
   return seen ? out : null;
 }
 

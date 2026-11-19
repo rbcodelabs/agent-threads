@@ -9,7 +9,7 @@
  */
 
 import type { LocalDaemonSettings, RemoteDaemonConfig } from '../types';
-import { compareVersions, type ProbeResult } from '../remote/DaemonClient';
+import { type ProbeResult } from '../remote/DaemonClient';
 import { randomHex } from '../remote/randomId';
 import { CONTAINER_AUTH_TOKEN_SECRET, type ContainerSignInResult } from '../claudeContainerAuthCli';
 import type { HarnessLoginResult } from './harnessLogin';
@@ -55,7 +55,9 @@ import { LocalDaemonWatchdog, type WatchdogConfig, type WatchdogState } from './
 import { buildRegistration, isRegistrationCurrent, localDaemonUrl, LOCAL_DAEMON_TOKEN_SECRET } from './registration';
 import { installRuntime, readRuntime, startRuntimeService, type RuntimeApi } from './runtime';
 import {
-  CODEX_VERSION,
+  MANAGED_HARNESS_TARGETS,
+  isManagedHarness,
+  type ManagedHarness,
   DEFAULT_HOST_PORT,
   HOST_PORT_SEARCH_LIMIT,
   LOCAL_DAEMON_ID,
@@ -170,6 +172,13 @@ export interface CodexUpdatePreview {
   from: string;
   to: string;
   availability: HarnessMaintenanceAvailability;
+  versions?: readonly HarnessVersionChange[];
+}
+
+export interface HarnessVersionChange {
+  harness: ManagedHarness;
+  from: string;
+  to: string;
 }
 
 export interface LocalDaemonSnapshot {
@@ -206,7 +215,7 @@ const OP_LABEL: Record<LocalDaemonOpKind, string> = {
   restart: 'Restarting the local daemon',
   kill: 'Force-stopping the local daemon',
   update: 'Updating the local daemon',
-  'update-harnesses': 'Updating the Codex harness',
+  'update-harnesses': 'Updating the local daemon harnesses',
   reset: 'Resetting the local daemon',
   remove: 'Removing the local daemon',
   'sign-in': 'Signing in to Claude',
@@ -243,7 +252,9 @@ interface ActiveOp {
 /** Keep a refreshed image when recreating the same daemon version and harness set for mount/settings changes. */
 function retainedCodexImage(reference: string | undefined, version: string, harnesses: readonly string[]): string | undefined {
   const family = `${localImageRef(version, harnesses)}-codex-refresh-`;
-  return reference?.split('/').pop()?.startsWith(family) ? reference : undefined;
+  const tag = reference?.split('/').pop();
+  return tag && (tag.startsWith(family) || tag.startsWith(`${localImageRef(version, harnesses)}-harness-refresh-`))
+    ? reference : undefined;
 }
 
 export class LocalDaemonController {
@@ -514,14 +525,14 @@ export class LocalDaemonController {
   async snapshot(opts: { quick?: boolean } = {}): Promise<LocalDaemonSnapshot> {
     const o = await this.observe(undefined, opts);
     const binary = o.observed.supported ? (await readRuntime(this.deps.runtime)).binary : undefined;
-    const current = !this.op && this.codexUpdateFrom(o);
+    const current = !this.op && this.harnessUpdatePreview(o);
     const token = current ? this.deps.secrets.get(LOCAL_DAEMON_TOKEN_SECRET) : undefined;
     const availability = token && this.deps.harnessMaintenance
       ? await this.deps.harnessMaintenance(o.port, token, 'GET') : 'unknown';
     return {
       assessment: o.assessment,
       observed: o.observed,
-      ...(current ? { codexUpdate: { from: current, to: CODEX_VERSION, availability } } : {}),
+      ...(current ? { codexUpdate: { ...current, availability } } : {}),
       ...(o.daemonVersion ? { daemonVersion: o.daemonVersion } : {}),
       pluginVersion: this.deps.pluginVersion,
       port: o.port,
@@ -785,25 +796,35 @@ export class LocalDaemonController {
     });
   }
 
-  private codexUpdateFrom({ observed, assessment }: Awaited<ReturnType<LocalDaemonController['observe']>>): string | undefined {
-    if (!this.harnesses().includes('codex') || observed.container !== 'running' || observed.tokenAccepted !== 'yes'
-      || assessment.drift || (assessment.status !== 'running' && assessment.status !== 'needs-sign-in')) return undefined;
-    const installed = observed.harnessProbe?.codex?.version;
-    if (!installed) return undefined;
-    const ordering = compareVersions(installed.split(/[-+]/, 1)[0], CODEX_VERSION);
-    return ordering < 0 || (ordering === 0 && installed.split('+', 1)[0].includes('-')) ? installed : undefined;
+  private harnessVersions(probe: Observed['harnessProbe'] | null): HarnessVersionChange[] {
+    return this.harnesses().filter(isManagedHarness).map((harness) => ({
+      harness,
+      from: probe?.[harness]?.version ?? 'unknown',
+      to: MANAGED_HARNESS_TARGETS[harness],
+    }));
   }
 
-  /** Installs the reviewed Codex pin on the currently installed image. Never changes the daemon's base version. */
+  private harnessUpdatePreview({ observed, assessment }: Awaited<ReturnType<LocalDaemonController['observe']>>): Omit<CodexUpdatePreview, 'availability'> | undefined {
+    if (observed.container !== 'running' || observed.tokenAccepted !== 'yes'
+      || assessment.drift || (assessment.status !== 'running' && assessment.status !== 'needs-sign-in')) return undefined;
+    const versions = this.harnessVersions(observed.harnessProbe);
+    const first = versions.find(({ from, to }) => from !== to);
+    if (!first) return undefined;
+    return { from: first.from, to: first.to, versions };
+  }
+
+  /** Replaces the enabled managed harnesses on the installed daemon base. */
   updateHarnesses(preview: CodexUpdatePreview, opts: RunOptions = {}): Promise<void> {
     return this.runOp('update-harnesses', opts, async (ctx) => {
       this.requireEnabled();
       const vaultPath = this.requireVault();
       const before = await this.observe(ctx.signal);
       this.guardStatus(before.assessment, before.observed);
-      const from = this.codexUpdateFrom(before);
-      if (!from || preview.from !== from || preview.to !== CODEX_VERSION) {
-        throw new LocalDaemonError('unavailable', 'The Codex version or daemon settings changed. Check the update again.');
+      const currentPreview = this.harnessUpdatePreview(before);
+      const versions = currentPreview?.versions;
+      if (!versions || !currentPreview || preview.from !== currentPreview.from || preview.to !== currentPreview.to
+        || JSON.stringify(preview.versions) !== JSON.stringify(versions)) {
+        throw new LocalDaemonError('unavailable', 'The harness versions or daemon settings changed. Check the update again.');
       }
       const token = this.deps.secrets.get(LOCAL_DAEMON_TOKEN_SECRET);
       const maintenance = this.deps.harnessMaintenance;
@@ -821,8 +842,8 @@ export class LocalDaemonController {
         || await imageDigest(d, previousImage.reference) !== previousImage.digest) {
         throw new LocalDaemonError('unavailable', 'Could not verify the running daemon’s image for rollback.');
       }
-      const image = `${localImageRef(spec.version, spec.harnesses)}-codex-refresh-${CODEX_VERSION}-${previousImage.digest.slice(7, 19)}`;
-      ctx.emit({ label: `Building the Codex ${CODEX_VERSION} image` });
+      const image = `${localImageRef(spec.version, spec.harnesses)}-harness-refresh-${versions.map(({ to }) => to).join('-')}-${previousImage.digest.slice(7, 19)}`;
+      ctx.emit({ label: `Building the harness update image` });
       await buildThinImage(d, spec.version, spec.harnesses, { previousImage: previousImage.reference, image });
       await verifyThinImage(d, spec.version, spec.harnesses, image);
       const candidate = await imageDigest(d, image);
@@ -837,7 +858,7 @@ export class LocalDaemonController {
         if (typeof latest !== 'object' || latest.state !== 'running' || latest.image?.digest !== previousImage.digest
           || latest.labels[LABEL_SPEC] !== specSignature(this.specFor(vaultPath, before.version, before.port))
           || await imageDigest(d, previousImage.reference) !== previousImage.digest
-          || (await probeHarnesses(d, vaultPath))?.codex?.version !== from) {
+          || JSON.stringify(this.harnessVersions(await probeHarnesses(d, vaultPath))) !== JSON.stringify(versions)) {
           throw new LocalDaemonError('unavailable', 'The daemon changed while the image was building. Check the update again.');
         }
         if (ctx.signal.aborted) throw new LocalDaemonAbortedError();
@@ -851,9 +872,9 @@ export class LocalDaemonController {
           await removeContainer(steps, vaultPath);
           await this.runAndAwaitHealthy(steps, vaultPath, () => createContainer(steps, { ...spec, image }), spec.hostPort, swap);
           const observed = await this.deps.probeDaemon(localDaemonUrl(spec.hostPort), token);
-          const installed = (await probeHarnesses(steps, vaultPath))?.codex?.version;
-          if (!observed.ok || observed.info.daemonVersion !== spec.version || installed !== CODEX_VERSION) {
-            throw new LocalDaemonError('verify', `The replacement daemon did not answer with Codex ${CODEX_VERSION}.`);
+          const installed = await probeHarnesses(steps, vaultPath);
+          if (!observed.ok || observed.info.daemonVersion !== spec.version || versions.some(({ harness, to }) => installed?.[harness]?.version !== to)) {
+            throw new LocalDaemonError('verify', `The replacement daemon did not report the reviewed harness versions.`);
           }
           replacementVerified = true;
         } catch (err) {
@@ -871,7 +892,7 @@ export class LocalDaemonController {
         // DELETE is idempotent for this lease id. Attempt release even on a dropped acquisition reply.
         const release = () => check('DELETE', id).catch(() => 'unknown');
         if (await release() !== 'idle' && await release() !== 'idle' && replacementVerified) {
-          throw new LocalDaemonError('unavailable', `Codex ${CODEX_VERSION} was installed, but the daemon could not confirm that maintenance ended. New turns may be paused until the maintenance lease expires.`);
+          throw new LocalDaemonError('unavailable', `The harness versions were installed, but the daemon could not confirm that maintenance ended. New turns may be paused until the maintenance lease expires.`);
         }
       }
     });
@@ -880,7 +901,7 @@ export class LocalDaemonController {
   private requireHarnessIdle(availability: HarnessMaintenanceAvailability): void {
     if (availability === 'idle') return;
     if (availability === 'busy') throw new LocalDaemonError('busy', 'The local daemon is busy. Wait for running work and pending requests to finish, then retry.');
-    if (availability === 'unsupported') throw new LocalDaemonError('incompatible', 'Update the local daemon before updating its Codex harness.');
+    if (availability === 'unsupported') throw new LocalDaemonError('incompatible', 'Update the local daemon before updating its harnesses.');
     throw new LocalDaemonError('unavailable', 'Could not verify that the local daemon is idle.');
   }
 

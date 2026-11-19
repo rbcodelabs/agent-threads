@@ -1,3 +1,4 @@
+import { MANAGED_HARNESS_TARGETS } from '../../src/localDaemon/spec';
 import { describe, expect, it, vi } from 'vitest';
 import { makeHarness } from '../helpers/localDaemonHarness';
 import { snap } from '../helpers/localDaemonSnap';
@@ -8,6 +9,11 @@ import { CODEX_VERSION, buildThinImageArgs, dataVolumeFor, localImageRef } from 
 
 const older = `${CODEX_VERSION}-alpha.1`;
 const ahead = `${Number(CODEX_VERSION.split('.')[0]) + 1}.0.0`;
+
+it('measures Claude and Antigravity from their native version output', () => {
+  expect(parseHarnessProbe('claude.cli=1\nclaude.version=2.1.89 (Claude Code)\nantigravity.cli=1\nantigravity.version=1.5.12'))
+    .toMatchObject({ claude: { version: '2.1.89' }, antigravity: { version: '1.5.12' } });
+});
 
 describe('Codex harness freshness', () => {
   it('probes the actual binary version and preserves its pre-release suffix', () => {
@@ -66,6 +72,26 @@ describe('Codex harness freshness', () => {
 
   }, 30_000);
 
+  it('updates Claude and Antigravity together in a daemon with no Codex', async () => {
+    const harnesses = ['claude', 'antigravity'] as const;
+    const h = makeHarness({ settings: { enabled: true, port: 7433, harnesses: [...harnesses] } });
+    await h.controller.setUp();
+    const state = h.readState();
+    const old = state.images[localImageRef(h.pluginVersion, harnesses)];
+    old.claudeVersion = '2.0.0';
+    delete old.antigravityVersion;
+    h.writeState(state);
+    const controller = new LocalDaemonController({ ...h.deps, harnessMaintenance: async () => 'idle' });
+    const preview = (await controller.snapshot()).codexUpdate!;
+    expect(preview.versions).toEqual([
+      { harness: 'claude', from: '2.0.0', to: MANAGED_HARNESS_TARGETS.claude },
+      { harness: 'antigravity', from: 'unknown', to: MANAGED_HARNESS_TARGETS.antigravity },
+    ]);
+    await controller.updateHarnesses(preview);
+    expect((await controller.snapshot()).codexUpdate).toBeUndefined();
+    expect(h.readState().volumes).toEqual(state.volumes);
+  }, 30_000);
+
   it('leaves a busy daemon running when an active turn arrives after preview', async () => {
     const { h, oldImage } = await legacy();
     const controller = new LocalDaemonController({ ...h.deps, harnessMaintenance: async (_port, _token, method) => method === 'POST' ? 'busy' : 'idle' });
@@ -86,7 +112,7 @@ describe('Codex harness freshness', () => {
     expect(h.readState().volumes).toEqual(state.volumes);
   }, 30_000);
 
-  it('withholds the update if the measured binary is ahead of the pin', async () => {
+  it('discloses a downgrade to the reviewed pin', async () => {
     const { h, oldImage } = await legacy();
     const state = h.readState();
     state.images[oldImage].codexVersion = ahead;
@@ -94,6 +120,6 @@ describe('Codex harness freshness', () => {
     const controller = new LocalDaemonController({ ...h.deps, harnessMaintenance: async () => 'idle' });
     const snapshot = await controller.snapshot();
     expect(snapshot.observed.harnessProbe?.codex?.version).toBe(ahead);
-    expect(snapshot.codexUpdate).toBeUndefined();
+    expect(snapshot.codexUpdate?.versions).toEqual([{ harness: 'codex', from: ahead, to: CODEX_VERSION }]);
   }, 30_000);
 });

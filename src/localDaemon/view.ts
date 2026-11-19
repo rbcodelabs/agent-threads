@@ -7,7 +7,7 @@
 import { RUNTIME_PKG_BYTES } from '../sandboxRuntime';
 import type { CodexUpdatePreview, LocalDaemonSnapshot } from './controller';
 import type { DegradedReason } from './assess';
-import { HARNESS_LABEL, LOCAL_HARNESSES, VAULT_GUEST_PATH, manualLoginCommand, normalizeHarnesses, type LocalHarness } from './spec';
+import { isManagedHarness, HARNESS_LABEL, LOCAL_HARNESSES, VAULT_GUEST_PATH, manualLoginCommand, normalizeHarnesses, type LocalHarness } from './spec';
 
 export type LocalDaemonButtonId =
   | 'setup' | 'start' | 'stop' | 'restart' | 'reset' | 'update' | 'update-harnesses' | 'sign-in' | 'remove' | 'kill';
@@ -92,7 +92,8 @@ export function buildHarnessRows(snap: LocalDaemonSnapshot): HarnessRow[] {
       return { ...base, status: running ? `CLI state unknown${known}` : `On; checked while the daemon runs${known}`, tone: 'muted' };
     }
     if (!probe.cli) return { ...base, status: 'CLI is not in the daemon image yet. Apply changes to rebuild it.', tone: 'warn' };
-    const version = id === 'codex' ? (probe.version ? ` (Codex ${probe.version})` : ' (version unknown)') : '';
+    const version = isManagedHarness(id)
+      ? (probe.version ? ` (${HARNESS_LABEL[id]} ${probe.version})` : ' (version unknown)') : '';
     if (signedIn) return { ...base, status: `CLI installed, signed in${version}`, tone: 'ok' };
     if (id === 'claude') return { ...base, status: 'CLI installed, needs sign-in', tone: 'warn' };
     const command = manualLoginCommand(id, snap.containerName ?? 'agent-threads-local', snap.containerBinary);
@@ -108,7 +109,7 @@ export function buildLocalDaemonView(snap: LocalDaemonSnapshot): LocalDaemonView
   const update = snap.codexUpdate;
   const disabledReason = update && update.availability !== 'idle' ? {
     busy: 'Wait for the daemon to finish active work and pending requests, then reopen these settings.',
-    unsupported: 'Update the local daemon before updating its Codex harness.',
+    unsupported: 'Update the local daemon before updating its harnesses.',
     unknown: 'Could not verify that the local daemon is idle.',
   }[update.availability] : undefined;
   const buttons = update && !hide ? [
@@ -119,7 +120,9 @@ export function buildLocalDaemonView(snap: LocalDaemonSnapshot): LocalDaemonView
 }
 
 export function describeCodexUpdate(update: CodexUpdatePreview): string {
-  return `Update Codex from ${update.from} to ${update.to}? The daemon must be idle. The update keeps your sign-ins, sessions and files, and tries to restore the previous image if the replacement fails.`;
+  const versions = update.versions?.map(({ harness, from, to }) => `${HARNESS_LABEL[harness]} from ${from} to ${to}`).join(', ');
+  const summary = versions || `Codex from ${update.from} to ${update.to}`;
+  return `Update ${summary}? The daemon must be idle. The update keeps your sign-ins, sessions and files, and tries to restore the previous image if the replacement fails.`;
 }
 
 function buildViewCore(snap: LocalDaemonSnapshot): Omit<LocalDaemonView, 'harnessRows'> & { harnessRows?: HarnessRow[] } {
