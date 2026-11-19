@@ -26,14 +26,18 @@ export async function openCodexNetworkSettings(page: Page, width = 1280, height 
   await page.locator('.ct-thread-more-btn').click();
 }
 
-export async function chooseNetworkAccess(page: Page, enabled: boolean): Promise<void> {
+export async function chooseNetworkAccess(page: Page, enabled: boolean | undefined): Promise<void> {
+  const label = enabled === undefined ? 'Use default' : enabled ? 'On' : 'Off';
   const savesBeforeChoice = await page.evaluate(() => (window as any).__networkSaves.length as number);
-  await page.getByRole('menuitemradio', { name: enabled ? 'On' : 'Off', exact: true }).click();
+  await page.getByRole('menuitemradio', { name: label, exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__manager.getThread('thread-fix-auth').codexNetworkAccessEnabled)).toBe(enabled);
+  if (enabled === undefined) {
+    expect(await page.evaluate(() => 'codexNetworkAccessEnabled' in JSON.parse(JSON.stringify((window as any).__manager.getThread('thread-fix-auth'))))).toBe(false);
+  }
   // Focusing threads and other view updates also save settings. Require this
   // choice to reach persistence without imposing a count on unrelated saves.
-  await expect.poll(() => page.evaluate((start) => (window as any).__networkSaves.slice(start), savesBeforeChoice)).toContain(enabled);
-  await expect(networkRow(page)).toContainText(enabled ? 'On' : 'Off');
+  await expect.poll(() => page.evaluate(({ start, choice }) => (window as any).__networkSaves.slice(start).some((value: boolean | undefined) => value === choice), { start: savesBeforeChoice, choice: enabled })).toBe(true);
+  await expect(networkRow(page)).toContainText(label);
   await networkRow(page).click();
-  await expect(page.getByRole('menuitemradio', { name: enabled ? 'On' : 'Off', exact: true })).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByRole('menuitemradio', { name: label, exact: true })).toHaveAttribute('aria-checked', 'true');
 }

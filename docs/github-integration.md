@@ -8,7 +8,11 @@ started with **Run on: This Mac (container)**). On Obsidian, or on a Geode witho
 the GitHub connection, nothing changes and your own credentials keep working.
 
 For a local Codex thread, enable **Network access** in that thread's footer
-settings before running `gh` or `git` against GitHub. This is off by default,
+settings before running `gh` or `git` against GitHub. Choose **On**, or **Use default**
+with **Settings → Agent → Codex network access default** enabled. The shared default
+starts Off, and explicit On/Off thread choices are preserved when it changes.
+Shared-default changes apply at the next local session start/restart; selecting
+**Use default** applies the current default to that thread immediately. Networking is
 independent of **Permissions**; even **Bypass all permissions** does not grant
 network access. Plan mode always denies network access. The in-app browser and
 Geode GitHub tools use the host connection and can work while Codex's shell

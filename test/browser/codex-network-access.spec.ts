@@ -4,9 +4,9 @@ import { openCodexNetworkSettings, networkRow, chooseNetworkAccess } from '../ha
 for (const [width, height] of [[1280, 800], [390, 844], [375, 667]]) {
   test(`local Codex network defaults off and persists choices at ${width}px`, async ({ page }) => {
     await openCodexNetworkSettings(page, width, height);
-    await expect(networkRow(page)).toContainText('Off');
+    await expect(networkRow(page)).toContainText('Use default (Off)');
     await networkRow(page).click();
-    await expect(page.getByRole('menuitemradio', { name: 'Off', exact: true })).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByRole('menuitemradio', { name: 'Use default', exact: true })).toHaveAttribute('aria-checked', 'true');
     await expect(page.locator('.ct-sp-note')).toContainText('Plan mode still denies network access');
     await chooseNetworkAccess(page, true);
     await page.keyboard.press('Escape');
@@ -17,6 +17,21 @@ for (const [width, height] of [[1280, 800], [390, 844], [375, 667]]) {
     await page.locator('.ct-thread-more-btn').click();
     await expect(networkRow(page)).toContainText('On');
     await networkRow(page).click();
+    await chooseNetworkAccess(page, false);
+    await expect(page.getByRole('menuitemradio', { name: 'Off', exact: true })).toHaveAttribute('aria-checked', 'true');
+    await chooseNetworkAccess(page, undefined);
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    await page.evaluate(async () => {
+      const host = window as any;
+      host.__view.plugin.settings.codexNetworkAccessDefault = true;
+      host.__manager.updateSettings(host.__view.plugin.settings);
+      await host.__view.focusThread('thread-fix-auth');
+    });
+    await page.locator('.ct-thread-more-btn').click();
+    await expect(networkRow(page)).toContainText('Use default (On)');
+    await networkRow(page).click();
+    await expect(page.getByRole('menuitemradio', { name: 'Use default', exact: true })).toHaveAttribute('aria-checked', 'true');
     await chooseNetworkAccess(page, false);
     await page.getByRole('menuitem', { name: 'Network access', exact: true }).click();
     await expect(networkRow(page)).toContainText('Off');

@@ -17,7 +17,7 @@ Every thread is its own agent session with streaming replies, visible tool calls
 - **Agent Board.** See every thread as a card, grouped by status or by project, from idle to running to waiting to done.
 - **Sub-agents you can follow.** A pill in the composer counts background agents. Open the tree and read any agent's activity timeline.
 - **You stay in control.** Claude and Codex ask before they write files or run commands, inline in the conversation. Plan Mode lets you approve a plan first.
-- **Codex network access is a thread choice.** Its footer settings include **Network access**, off by default. Turning it on keeps the filesystem sandbox in place; Plan mode stays network-disabled.
+- **Codex network access has a shared default and thread overrides.** The local Codex default starts Off; each thread can choose **Use default**, **On**, or **Off**. Existing explicit choices are preserved. The filesystem sandbox stays in place and Plan mode stays network-disabled.
 - **Local-first, in your vault.** Threads live next to your notes and link to them. No account, no hosted service in the middle.
 - **Goals, loops and schedules.** Pin a goal with `/goal`, or re-run a prompt with `/loop 10m <prompt>`.
 

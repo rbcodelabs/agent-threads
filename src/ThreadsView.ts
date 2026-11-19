@@ -3197,10 +3197,13 @@ export class ThreadsView extends ItemView {
       },
       ...(harness === 'codex' && !thread.remote ? [{
         id: 'codex-network-access', label: 'Network access', icon: 'globe',
-        value: thread.codexNetworkAccessEnabled === true ? 'On' : 'Off',
-        groups: [{ note: 'Allow this Codex thread to reach the network while keeping its filesystem sandbox. Plan mode still denies network access.', options: [
-          { label: 'Off', checked: thread.codexNetworkAccessEnabled !== true, onSelect: () => this.applyThreadCodexNetworkAccess(threadId, false) },
+        value: thread.codexNetworkAccessEnabled === undefined
+          ? `Use default (${this.plugin.settings.codexNetworkAccessDefault === true ? 'On' : 'Off'})`
+          : thread.codexNetworkAccessEnabled ? 'On' : 'Off',
+        groups: [{ note: 'Use the shared local Codex default, or choose for this thread. The filesystem sandbox stays in place. Plan mode still denies network access.', options: [
+          { label: 'Use default', checked: thread.codexNetworkAccessEnabled === undefined, onSelect: () => this.applyThreadCodexNetworkAccess(threadId, undefined) },
           { label: 'On', checked: thread.codexNetworkAccessEnabled === true, onSelect: () => this.applyThreadCodexNetworkAccess(threadId, true) },
+          { label: 'Off', checked: thread.codexNetworkAccessEnabled === false, onSelect: () => this.applyThreadCodexNetworkAccess(threadId, false) },
         ] }],
       }] : []),
       { id: 'harness', label: 'Harness', icon: 'bot', value: harnessValue, groups: harnessGroups },
@@ -3374,7 +3377,7 @@ export class ThreadsView extends ItemView {
     this.renderThreadInfo();
   }
 
-  private async applyThreadCodexNetworkAccess(threadId: string, enabled: boolean): Promise<void> {
+  private async applyThreadCodexNetworkAccess(threadId: string, enabled: boolean | undefined): Promise<void> {
     try {
       await this.manager.setThreadCodexNetworkAccess(threadId, enabled);
     } catch (error) {

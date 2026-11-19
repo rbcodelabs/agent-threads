@@ -1457,13 +1457,15 @@ export class ThreadManager {
     }
   }
 
-  async setThreadCodexNetworkAccess(id: string, enabled: boolean): Promise<void> {
+  async setThreadCodexNetworkAccess(id: string, enabled: boolean | undefined): Promise<void> {
     const prior = this.codexNetworkUpdateTails.get(id) ?? Promise.resolve();
     const update = prior.then(async () => {
       const thread = this.threads.get(id);
       if (!thread || thread.remote || (thread.agentHarness ?? 'claude') !== 'codex') return;
-      await this.sessions.get(id)?.setNetworkAccessEnabled?.(enabled);
-      thread.codexNetworkAccessEnabled = enabled;
+      const effective = enabled ?? this.settings.codexNetworkAccessDefault === true;
+      await this.sessions.get(id)?.setNetworkAccessEnabled?.(effective);
+      if (enabled === undefined) delete thread.codexNetworkAccessEnabled;
+      else thread.codexNetworkAccessEnabled = enabled;
       thread.updatedAt = Date.now();
     });
     const tail = update.catch(() => {});
@@ -2630,7 +2632,7 @@ export class ThreadManager {
       },
       codex: {
         computerUseEnabled: this.settings.codexComputerUseEnabled === true,
-        networkAccessEnabled: thread.codexNetworkAccessEnabled === true,
+        networkAccessEnabled: thread.codexNetworkAccessEnabled ?? this.settings.codexNetworkAccessDefault === true,
         localSkillsRoot: this.localSkillsRoot(),
         ...resolveCodexPermissions(thread.permissionMode ?? this.settings.permissionMode),
         ...(this.settings.codexEffort && this.settings.codexEffort !== 'default'
