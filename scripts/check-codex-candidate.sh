@@ -9,7 +9,7 @@ image="localhost/agent-threads-codex-candidate:smoke-$$"
 trap '"$engine" image rm "$image" >/dev/null 2>&1 || true' EXIT
 
 "$engine" build --target with-harnesses --file sandbox/Dockerfile.daemon \
-  --build-arg INSTALL_CODEX=1 --build-arg "CODEX_VERSION=$version" --tag "$image" .
+  --build-arg INSTALL_CODEX=1 --tag "$image" .
 "$engine" run --rm --network=none --entrypoint node \
   --mount "type=bind,source=$PWD/scripts/codex-candidate-smoke.mjs,target=/codex-candidate-smoke.mjs,readonly" \
   "$image" /codex-candidate-smoke.mjs "$version"

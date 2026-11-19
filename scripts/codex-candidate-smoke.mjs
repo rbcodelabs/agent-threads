@@ -137,11 +137,11 @@ async function main(expectedVersion) {
   let daemon;
   let output = '';
   try {
+    await mkdir(workspace);
+    await mkdir(codexHome);
     const actual = execFileSync(codex, ['--version'], { env, encoding: 'utf8', timeout: 5000 }).trim();
     assert.equal(actual, `codex-cli ${expectedVersion}`, 'candidate image must carry the reviewed exact version');
     console.log(`PASS ${actual}`);
-    await mkdir(workspace);
-    await mkdir(codexHome);
     fixture = startModelFixture(turns, requests);
     await once(fixture, 'listening');
     await writeFile(join(codexHome, 'config.toml'), [
