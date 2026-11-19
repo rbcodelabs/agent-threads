@@ -159,6 +159,8 @@ export class CodexSession {
   private pendingQuestionRequestIds = new Set<string>();
   private localSkillCommands = new Map<string, { name: string; path: string; description: string }>();
   private localSkillsDiscovered = false;
+  private policyUpdateTail: Promise<void> = Promise.resolve();
+  private sessionGeneration = 0;
 
   constructor(private codexPath: string) {}
 
@@ -280,6 +282,17 @@ export class CodexSession {
       });
     }
     this.codexThreadId = result.thread.id;
+    try {
+      // start/resume accept only a sandbox mode string. Apply the structured
+      // network policy before the first turn, including when resuming a thread.
+      await this.queuePolicyUpdate(() => this.request('thread/settings/update', {
+        threadId: this.codexThreadId,
+        sandboxPolicy: this.sandboxPolicy(this.effectiveSandbox(options.permissionMode)),
+      }));
+    } catch (error) {
+      this.close();
+      throw error;
+    }
     this.activeModel = result.model ?? this.activeModel;
     this.discoverModels();
     await this.discoverSkills();
@@ -375,20 +388,47 @@ export class CodexSession {
   }
 
   async setPermissionMode(mode: HarnessPermissionMode): Promise<void> {
-    if (!this.codexThreadId) {
+    await this.queuePolicyUpdate(async (generation) => {
+      if (!this.codexThreadId) {
+        if (this.options) this.options.permissionMode = mode;
+        return;
+      }
+      const permissions = resolveCodexPermissions(mode);
+      await this.request('thread/settings/update', {
+        threadId: this.codexThreadId,
+        collaborationMode: this.collaborationMode(mode === 'plan' ? 'plan' : 'default'),
+        effort: this.options?.codex?.effort ?? null,
+        approvalPolicy: permissions.approvalPolicy,
+        sandboxPolicy: this.sandboxPolicy(this.effectiveSandbox(mode)),
+      });
+      if (generation !== this.sessionGeneration) throw new Error('Codex session changed during policy update');
       if (this.options) this.options.permissionMode = mode;
-      return;
-    }
-    const permissions = resolveCodexPermissions(mode);
-    if (this.options?.codex?.enforceReadOnly) permissions.sandbox = 'read-only';
-    await this.request('thread/settings/update', {
-      threadId: this.codexThreadId,
-      collaborationMode: this.collaborationMode(mode === 'plan' ? 'plan' : 'default'),
-      effort: this.options?.codex?.effort ?? null,
-      approvalPolicy: permissions.approvalPolicy,
-      sandboxPolicy: this.sandboxPolicy(permissions.sandbox),
     });
-    if (this.options) this.options.permissionMode = mode;
+  }
+
+  async setNetworkAccessEnabled(enabled: boolean): Promise<void> {
+    await this.queuePolicyUpdate(async (generation) => {
+      if (!this.options) return;
+      const sandbox = this.effectiveSandbox(this.options.permissionMode);
+      if (this.codexThreadId) {
+        await this.request('thread/settings/update', {
+          threadId: this.codexThreadId,
+          sandboxPolicy: this.sandboxPolicy(sandbox, enabled),
+        });
+      }
+      if (generation !== this.sessionGeneration) throw new Error('Codex session changed during policy update');
+      if (this.options.codex) this.options.codex.networkAccessEnabled = enabled;
+    });
+  }
+
+  private queuePolicyUpdate(update: (generation: number) => Promise<void>): Promise<void> {
+    const generation = this.sessionGeneration;
+    const result = this.policyUpdateTail.then(() => {
+      if (generation !== this.sessionGeneration) throw new Error('Codex session changed before policy update');
+      return update(generation);
+    });
+    this.policyUpdateTail = result.catch(() => {});
+    return result;
   }
 
   send(text: string, images?: ImageAttachment[], _userMessageUuid?: string): void {
@@ -495,6 +535,8 @@ export class CodexSession {
   }
 
   close(): void {
+    this.sessionGeneration++;
+    this.policyUpdateTail = Promise.resolve();
     this.closed = true;
     this._turnInFlight = false;
     this.activeTurnId = undefined;
@@ -505,6 +547,7 @@ export class CodexSession {
     this.cancelPendingQuestionRequests();
     this.process?.kill();
     this.process = null;
+    this.codexThreadId = undefined;
     this.failAll(new Error('Codex session closed'));
   }
 
@@ -588,13 +631,18 @@ export class CodexSession {
       .catch((error) => console.warn('[ClaudeThreads] Could not list Codex skills:', error));
   }
 
-  private sandboxPolicy(sandbox: 'read-only' | 'workspace-write' | 'danger-full-access'): Record<string, unknown> {
+  private effectiveSandbox(mode: HarnessPermissionMode): 'read-only' | 'workspace-write' | 'danger-full-access' {
+    if (this.options?.codex?.enforceReadOnly) return 'read-only';
+    return resolveCodexPermissions(mode).sandbox;
+  }
+
+  private sandboxPolicy(sandbox: 'read-only' | 'workspace-write' | 'danger-full-access', networkAccessEnabled = this.options?.codex?.networkAccessEnabled === true): Record<string, unknown> {
     if (sandbox === 'read-only') return { type: 'readOnly', networkAccess: false };
     if (sandbox === 'danger-full-access') return { type: 'dangerFullAccess' };
     return {
       type: 'workspaceWrite',
       writableRoots: this.options?.additionalDirectories ?? (this.options?.cwd ? [this.options.cwd] : []),
-      networkAccess: false,
+      networkAccess: networkAccessEnabled,
       excludeTmpdirEnvVar: false,
       excludeSlashTmp: false,
     };

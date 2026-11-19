@@ -2038,6 +2038,19 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName('Codex network access default')
+      .setDesc('Default network access for local Codex threads using “Use default”. Off by default. Explicit On or Off thread choices are preserved; Plan mode still denies network access and remote threads are unchanged. Changes apply when a local Codex session next starts or restarts; existing sessions keep their current access. Choose “Use default” in a thread to apply the current default immediately.')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.codexNetworkAccessDefault === true)
+          .onChange(async (value) => {
+            this.plugin.settings.codexNetworkAccessDefault = value;
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName('Worktree location')
       .setDesc(
         'Where enter_worktree creates worktrees. Leave empty to use ~/.geode/worktrees. '

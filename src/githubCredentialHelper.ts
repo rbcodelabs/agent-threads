@@ -186,8 +186,10 @@ export function buildHostGitEnv(opts: {
   if (opts.identity?.name) add('user.name', opts.identity.name);
   if (opts.identity?.email) add('user.email', opts.identity.email);
   out.GIT_CONFIG_COUNT = String(n);
-  // No trailing ':' when PATH is unset — an empty entry would put the cwd on PATH.
-  out.PATH = opts.baseEnv.PATH ? `${opts.dir}/bin:${opts.baseEnv.PATH}` : `${opts.dir}/bin`;
+  // Desktop apps often inherit launchd's minimal PATH, which omits Homebrew.
+  // Keep the wrapper first and add only known binary directories.
+  out.PATH = [`${opts.dir}/bin`, opts.baseEnv.PATH, '/opt/homebrew/bin', '/usr/local/bin']
+    .filter(Boolean).join(':');
   return out;
 }
 

@@ -670,6 +670,8 @@ export interface Thread {
    * global settings.permissionMode for sessions in this thread.
    */
   permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
+  /** Explicit Codex network override. Local threads inherit the shared default when absent. */
+  codexNetworkAccessEnabled?: boolean;
   /**
    * Plan text from a pending ExitPlanMode call that hasn't been approved or
    * rejected yet. Persisted so the plan card can be restored after a reload
@@ -1186,6 +1188,8 @@ export interface PluginSettings {
   antigravityBinaryPath: string;
   /** Allow inherited Codex computer-use capabilities in newly initialized sessions. */
   codexComputerUseEnabled: boolean;
+  /** Default network access for local Codex sessions without a per-thread override. */
+  codexNetworkAccessDefault: boolean;
   /**
    * Root directory for worktrees created by `enter_worktree`.
    *
@@ -1513,6 +1517,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   opencodeBinaryPath: 'opencode',
   antigravityBinaryPath: 'agy',
   codexComputerUseEnabled: false,
+  codexNetworkAccessDefault: false,
   worktreeRoot: '',
   containerAwsProfiles: '',
   githubConnectionEnabled: true,

@@ -70,6 +70,8 @@ export interface HarnessSession {
   notifyPersisted?(seq?: number): void;
   setModel(model: string | undefined): Promise<void>;
   setPermissionMode(mode: HarnessPermissionMode): Promise<void>;
+  /** Codex only: change the thread's explicit network opt-in. */
+  setNetworkAccessEnabled?(enabled: boolean): Promise<void>;
   getContextUsage(): Promise<HarnessContextUsage | null>;
   /** Connection state of the session's MCP servers, when the harness can report it (Claude SDK). */
   mcpServerStatus?(): Promise<Array<{ name: string; status: string }>>;
@@ -141,6 +143,8 @@ export interface ClaudeHarnessOptions {
 export interface CodexHarnessOptions {
   /** Defaults off; true inherits local Codex computer-use configuration. */
   computerUseEnabled?: boolean;
+  /** Explicit per-thread opt-in. Omitted and false both deny network access. */
+  networkAccessEnabled?: boolean;
   approvalPolicy: 'untrusted' | 'on-request' | 'never';
   sandbox: 'read-only' | 'workspace-write' | 'danger-full-access';
   /**

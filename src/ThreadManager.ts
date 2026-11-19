@@ -184,6 +184,7 @@ export class ThreadManager {
    * "busy right now" from "warm but idle."
    */
   private sessions: Map<string, HarnessSession> = new Map();
+  private codexNetworkUpdateTails = new Map<string, Promise<void>>();
   /** Threads whose live session must be rebuilt at the next safe turn boundary (see requestSessionRestart). */
   private sessionRestartRequested = new Set<string>();
   /**
@@ -1456,6 +1457,25 @@ export class ThreadManager {
     }
   }
 
+  async setThreadCodexNetworkAccess(id: string, enabled: boolean | undefined): Promise<void> {
+    const prior = this.codexNetworkUpdateTails.get(id) ?? Promise.resolve();
+    const update = prior.then(async () => {
+      const thread = this.threads.get(id);
+      if (!thread || thread.remote || (thread.agentHarness ?? 'claude') !== 'codex') return;
+      const effective = enabled ?? this.settings.codexNetworkAccessDefault === true;
+      await this.sessions.get(id)?.setNetworkAccessEnabled?.(effective);
+      if (enabled === undefined) delete thread.codexNetworkAccessEnabled;
+      else thread.codexNetworkAccessEnabled = enabled;
+      thread.updatedAt = Date.now();
+    });
+    const tail = update.catch(() => {});
+    this.codexNetworkUpdateTails.set(id, tail);
+    void tail.then(() => {
+      if (this.codexNetworkUpdateTails.get(id) === tail) this.codexNetworkUpdateTails.delete(id);
+    });
+    return update;
+  }
+
   /**
    * Set or clear (pass undefined) the persistent goal for a thread and
    * invalidate any adapter built with the previous initialization context.
@@ -2612,6 +2632,7 @@ export class ThreadManager {
       },
       codex: {
         computerUseEnabled: this.settings.codexComputerUseEnabled === true,
+        networkAccessEnabled: thread.codexNetworkAccessEnabled ?? this.settings.codexNetworkAccessDefault === true,
         localSkillsRoot: this.localSkillsRoot(),
         ...resolveCodexPermissions(thread.permissionMode ?? this.settings.permissionMode),
         ...(this.settings.codexEffort && this.settings.codexEffort !== 'default'
@@ -2720,6 +2741,7 @@ export class ThreadManager {
       ...(harness === 'codex'
         ? {
             codex: {
+              networkAccessEnabled: thread.codexNetworkAccessEnabled === true,
               ...resolveCodexPermissions(thread.permissionMode ?? this.settings.permissionMode),
               ...(this.settings.codexEffort && this.settings.codexEffort !== 'default' ? { effort: this.settings.codexEffort } : {}),
               ...mcpBlock,
