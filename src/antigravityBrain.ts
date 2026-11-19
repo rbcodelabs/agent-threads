@@ -66,6 +66,11 @@ export interface PendingSubagentSpawnMeta {
   parentAgentId?: string;
 }
 
+export interface PendingBrainToolCallMeta {
+  bgCapable: boolean;
+  isDaemon: boolean;
+}
+
 export interface TrackedSubagent {
   id: string;
   description: string;
@@ -77,7 +82,7 @@ export interface TrackedSubagent {
   lastSentMessage?: string;
   lastStepError?: string;
   pendingSpawns: PendingSubagentSpawnMeta[];
-  pendingBgCapableCalls: number;
+  pendingToolCalls: PendingBrainToolCallMeta[];
   activeBgTaskIds: Set<string>;
 }
 
@@ -142,8 +147,30 @@ export function cleanBrainArgStringArray(value: unknown): string[] {
   return out;
 }
 
+/**
+ * Normalize a boolean tool-call argument (such as `IsDaemon` on `run_command`/`schedule`), handling native booleans
+ * in `transcript_full.jsonl` as well as stringified/JSON-quoted booleans (`"true"`, `"\"true\""`) in `transcript.jsonl`.
+ */
+export function cleanBrainArgBoolean(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const cleaned = cleanBrainArgString(value);
+    return cleaned?.toLowerCase() === 'true';
+  }
+  return false;
+}
+
 export function isAntigravityBgCapableTool(name: string | undefined): boolean {
   return name === 'run_command' || name === 'schedule' || name === 'run_workflow';
+}
+
+export function extractBrainToolCallBgMeta(
+  name: string | undefined,
+  args: Record<string, unknown> | undefined,
+): PendingBrainToolCallMeta {
+  const bgCapable = isAntigravityBgCapableTool(name);
+  const isDaemon = (name === 'run_command' || name === 'schedule') && cleanBrainArgBoolean(args?.IsDaemon);
+  return { bgCapable, isDaemon };
 }
 
 function firstCleanLine(value: unknown, maxChars = 200): string | undefined {

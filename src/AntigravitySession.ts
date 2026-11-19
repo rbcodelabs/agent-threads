@@ -54,14 +54,15 @@ import {
   cleanBrainArgStringArray,
   describeSubagentSpawn,
   extractAntigravityThoughtSummary,
+  extractBrainToolCallBgMeta,
   extractSubagentSpawnMeta,
-  isAntigravityBgCapableTool,
   parseAntigravityBackgroundTask,
   parseAntigravityCreatedSubagent,
   parseAntigravityWakeupMessage,
   resolveDefaultAntigravityBrainDir,
   type AntigravityBrainOptions,
   type BrainTranscriptStep,
+  type PendingBrainToolCallMeta,
   type PendingSubagentSpawnMeta,
   type TrackedSubagent,
 } from './antigravityBrain';
@@ -635,7 +636,7 @@ export class AntigravitySession {
   // Brain transcript tracking for subagent progress and post-ACP parent reactive wakeups
   private brainReader: BrainTranscriptReader | null = null;
   private parentPendingSpawns: PendingSubagentSpawnMeta[] = [];
-  private parentPendingBgCapableCalls = 0;
+  private parentPendingToolCalls: PendingBrainToolCallMeta[] = [];
   private subagents = new Map<string, TrackedSubagent>();
   private activeBgTaskIds = new Set<string>();
   private pendingWakeups = 0;
@@ -998,7 +999,7 @@ export class AntigravitySession {
     this.lastEmittedThoughtSummary = '';
     this.pendingTools = [];
     this.parentPendingSpawns = [];
-    this.parentPendingBgCapableCalls = 0;
+    this.parentPendingToolCalls = [];
     this.parentWakeupInFlight = false;
     this.wakeupPendingTools = [];
     this.wakeupToolStallDeadlineMs = 0;
@@ -1093,7 +1094,7 @@ export class AntigravitySession {
     this.pendingTools = [];
     this.queuedTurns = [];
     this.parentPendingSpawns = [];
-    this.parentPendingBgCapableCalls = 0;
+    this.parentPendingToolCalls = [];
     this.pendingWakeups = 0;
     this.wakeupDeadlineMs = 0;
     this.parentWakeupInFlight = false;
@@ -1418,7 +1419,7 @@ export class AntigravitySession {
       const step = steps[idx];
       if (step.type === 'PLANNER_RESPONSE') {
         this.parentPendingSpawns = [];
-        this.parentPendingBgCapableCalls = 0;
+        this.parentPendingToolCalls = [];
         const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
         for (const tc of calls) this.trackParentToolCallMeta(tc.name, tc.args, callbacks);
         // An LLM tool loop ends a `session/prompt` turn on the first `PLANNER_RESPONSE` with zero tool calls; anything
@@ -1448,7 +1449,7 @@ export class AntigravitySession {
       } else if (step.type === 'PLANNER_RESPONSE') {
         this.parentWakeupInFlight = true;
         this.parentPendingSpawns = [];
-        this.parentPendingBgCapableCalls = 0;
+        this.parentPendingToolCalls = [];
         if (typeof step.content === 'string' && step.content) {
           this.turnThought = '';
           this.lastEmittedThoughtSummary = '';
@@ -1510,10 +1511,9 @@ export class AntigravitySession {
   }
 
   private trackParentToolCallMeta(name: string | undefined, args: Record<string, unknown> | undefined, callbacks: SessionCallbacks): void {
+    this.parentPendingToolCalls.push(extractBrainToolCallBgMeta(name, args));
     if (name === 'invoke_subagent') {
       this.parentPendingSpawns.push(extractSubagentSpawnMeta(args));
-    } else if (isAntigravityBgCapableTool(name)) {
-      this.parentPendingBgCapableCalls++;
     } else if (name === 'send_message') {
       const recipient = cleanBrainArgString(args?.Recipient) ?? '';
       const child = recipient ? this.subagents.get(recipient) : undefined;
@@ -1550,7 +1550,7 @@ export class AntigravitySession {
 
   private markSubagentKilled(child: TrackedSubagent, callbacks: SessionCallbacks, reason: string): void {
     child.activeBgTaskIds.clear();
-    child.pendingBgCapableCalls = 0;
+    child.pendingToolCalls = [];
     child.pendingSpawns = [];
     if (!child.running) return;
     child.running = false;
@@ -1560,6 +1560,7 @@ export class AntigravitySession {
   }
 
   private harvestParentGenericStep(step: BrainTranscriptStep, callbacks: SessionCallbacks): void {
+    const toolMeta = this.parentPendingToolCalls.shift();
     if (this.parentPendingSpawns.length > 0) {
       const created = parseAntigravityCreatedSubagent(step.content);
       if (created) {
@@ -1567,14 +1568,11 @@ export class AntigravitySession {
         this.registerSubagent(created.conversationId, meta, callbacks);
       }
     }
-    if (this.parentPendingBgCapableCalls > 0) {
+    if (toolMeta?.bgCapable && !toolMeta.isDaemon) {
       const bg = parseAntigravityBackgroundTask(step.content);
-      if (bg) {
-        this.parentPendingBgCapableCalls = Math.max(0, this.parentPendingBgCapableCalls - 1);
-        if (!this.activeBgTaskIds.has(bg.taskId)) {
-          this.activeBgTaskIds.add(bg.taskId);
-          callbacks.onTaskStarted?.(bg.taskId, 'Background task', false, 'bash');
-        }
+      if (bg && !this.activeBgTaskIds.has(bg.taskId)) {
+        this.activeBgTaskIds.add(bg.taskId);
+        callbacks.onTaskStarted?.(bg.taskId, 'Background task', false, 'bash');
       }
     }
   }
@@ -1599,7 +1597,7 @@ export class AntigravitySession {
       running: true,
       sentMessageThisRun: false,
       pendingSpawns: [],
-      pendingBgCapableCalls: 0,
+      pendingToolCalls: [],
       activeBgTaskIds: new Set<string>(),
     };
     this.subagents.set(id, tracked);
@@ -1662,16 +1660,15 @@ export class AntigravitySession {
           } else if (step.type === 'PLANNER_RESPONSE') {
             subagent.lastStepError = undefined;
             subagent.pendingSpawns = [];
-            subagent.pendingBgCapableCalls = 0;
+            subagent.pendingToolCalls = [];
             if (typeof step.model === 'string' && step.model && !subagent.model) subagent.model = step.model;
             const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
             if (calls.length > 0) {
               subagent.running = true;
               for (const tc of calls) {
+                subagent.pendingToolCalls.push(extractBrainToolCallBgMeta(tc.name, tc.args));
                 if (tc.name === 'invoke_subagent') {
                   subagent.pendingSpawns.push(extractSubagentSpawnMeta(tc.args, subagent.id));
-                } else if (isAntigravityBgCapableTool(tc.name)) {
-                  subagent.pendingBgCapableCalls++;
                 } else if (tc.name === 'send_message' && cleanBrainArgString(tc.args?.Recipient) === this.sessionId) {
                   subagent.sentMessageThisRun = true;
                   subagent.lastSentMessage = cleanBrainArgString(tc.args?.Message);
@@ -1703,6 +1700,7 @@ export class AntigravitySession {
               }
             }
           } else if (step.type === 'GENERIC') {
+            const toolMeta = subagent.pendingToolCalls.shift();
             if (subagent.pendingSpawns.length > 0) {
               const created = parseAntigravityCreatedSubagent(step.content);
               if (created) {
@@ -1711,10 +1709,9 @@ export class AntigravitySession {
                 progress = true;
               }
             }
-            if (subagent.pendingBgCapableCalls > 0) {
+            if (toolMeta?.bgCapable && !toolMeta.isDaemon) {
               const bg = parseAntigravityBackgroundTask(step.content);
               if (bg) {
-                subagent.pendingBgCapableCalls = Math.max(0, subagent.pendingBgCapableCalls - 1);
                 subagent.activeBgTaskIds.add(bg.taskId);
               }
             }
@@ -1795,7 +1792,7 @@ export class AntigravitySession {
   private abortBackgroundWork(callbacks: SessionCallbacks, reason: string): void {
     for (const subagent of this.subagents.values()) {
       subagent.activeBgTaskIds.clear();
-      subagent.pendingBgCapableCalls = 0;
+      subagent.pendingToolCalls = [];
       subagent.pendingSpawns = [];
       if (subagent.running) {
         subagent.running = false;
