@@ -674,6 +674,7 @@ export class AntigravitySession {
   private outOfTurnFinalTextDeadlineMs = 0;
   private outOfTurnToolDrainDeadlineMs = 0;
   private outOfTurnNoBrainIdleDeadlineMs = 0;
+  private unconfirmedOutOfTurnWakeup = false;
   private unconfirmedOutOfTurnWakeupDeadlineMs = 0;
   private outOfTurnDrainTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1048,6 +1049,7 @@ export class AntigravitySession {
     this.outOfTurnFinalTextDeadlineMs = 0;
     this.outOfTurnToolDrainDeadlineMs = 0;
     this.outOfTurnNoBrainIdleDeadlineMs = 0;
+    this.unconfirmedOutOfTurnWakeup = false;
     this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
     this.clearOutOfTurnDrainTimer();
     const mode = options.permissionMode ?? 'default';
@@ -1078,6 +1080,10 @@ export class AntigravitySession {
       .then((result) => this.finishTurn(result))
       .catch((error) => {
         if (this.closed || !this._turnInFlight) return;
+        for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
+        this.pendingPermissions.clear();
+        this.settleUnfinishedAnnouncedTools(options.callbacks);
+        this.settleWakeupToolsAsError(options.callbacks);
         this.abortBackgroundWork(options.callbacks, 'Failed');
         this.cancelPendingElicitations();
         this.resetTurnState();
@@ -1090,6 +1096,7 @@ export class AntigravitySession {
     this.queuedTurns = [];
     // A pending approval or question would otherwise keep the agent waiting on us: answer it as cancelled first.
     for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
+    this.pendingPermissions.clear();
     this.cancelPendingElicitations();
     this.client.notify('session/cancel', { sessionId: this.sessionId });
     // When `session/prompt` already ended and we are holding the turn open for background subagents/wakeups, there is
@@ -1155,6 +1162,7 @@ export class AntigravitySession {
     this.outOfTurnFinalTextDeadlineMs = 0;
     this.outOfTurnToolDrainDeadlineMs = 0;
     this.outOfTurnNoBrainIdleDeadlineMs = 0;
+    this.unconfirmedOutOfTurnWakeup = false;
     this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
     this.clearOutOfTurnDrainTimer();
     this.brainReader?.stopWatching();
@@ -1233,21 +1241,32 @@ export class AntigravitySession {
     this.syncOutOfTurnTimer();
   }
 
-  private refreshNoBrainOutOfTurnIdleDeadline(): void {
-    if (
-      !this._turnInFlight ||
-      this.acpPromptInFlight ||
-      (this.brainReader && this.sessionId && this.brainReader.hasTranscript(this.sessionId))
-    ) {
+  private refreshOutOfTurnIdleDeadlines(): void {
+    if (!this._turnInFlight || this.acpPromptInFlight) {
       this.outOfTurnNoBrainIdleDeadlineMs = 0;
+      this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
       return;
     }
-    if (!this.allAnnouncedToolsSettled() || this.pendingPermissions.size > 0 || this.pendingElicitations.size > 0) {
+    const busy = !this.allAnnouncedToolsSettled() || this.pendingPermissions.size > 0 || this.pendingElicitations.size > 0;
+    const hasTranscript = Boolean(this.brainReader && this.sessionId && this.brainReader.hasTranscript(this.sessionId));
+    if (hasTranscript) {
       this.outOfTurnNoBrainIdleDeadlineMs = 0;
-      return;
+      if (!this.unconfirmedOutOfTurnWakeup || !this.parentWakeupInFlight || busy) {
+        this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+      } else {
+        const graceMs = this.brainOptions?.wakeupGraceMs ?? DEFAULT_WAKEUP_GRACE_MS;
+        this.unconfirmedOutOfTurnWakeupDeadlineMs = Date.now() + graceMs;
+      }
+    } else {
+      this.unconfirmedOutOfTurnWakeup = false;
+      this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+      if (busy) {
+        this.outOfTurnNoBrainIdleDeadlineMs = 0;
+      } else {
+        const idleMs = this.brainOptions?.outOfTurnNoBrainIdleMs ?? DEFAULT_OUT_OF_TURN_NO_BRAIN_IDLE_MS;
+        this.outOfTurnNoBrainIdleDeadlineMs = Date.now() + idleMs;
+      }
     }
-    const idleMs = this.brainOptions?.outOfTurnNoBrainIdleMs ?? DEFAULT_OUT_OF_TURN_NO_BRAIN_IDLE_MS;
-    this.outOfTurnNoBrainIdleDeadlineMs = Date.now() + idleMs;
     this.syncOutOfTurnTimer();
   }
 
@@ -1263,11 +1282,8 @@ export class AntigravitySession {
       if (!this.acpPromptInFlight && !this.parentWakeupInFlight && this.pendingOutOfTurnFinalTexts.length === 0) {
         this.parentWakeupInFlight = true;
         this.wakeupErrorDeadlineMs = 0;
-        if (this.brainReader?.hasTranscript(this.sessionId)) {
-          const graceMs = this.brainOptions?.wakeupGraceMs ?? DEFAULT_WAKEUP_GRACE_MS;
-          this.unconfirmedOutOfTurnWakeupDeadlineMs = Date.now() + graceMs;
-        }
-        this.refreshNoBrainOutOfTurnIdleDeadline();
+        this.unconfirmedOutOfTurnWakeup = Boolean(this.brainReader?.hasTranscript(this.sessionId));
+        this.refreshOutOfTurnIdleDeadlines();
         this.syncOutOfTurnTimer();
       }
       return;
@@ -1284,12 +1300,11 @@ export class AntigravitySession {
     if (this.brainReader) {
       this.brainReader.startPolling(() => this.onBrainTick());
       this.brainReader.watchConversation(this.sessionId, () => this.onBrainTick());
-      if (this.brainReader.hasTranscript(this.sessionId)) {
-        const graceMs = this.brainOptions?.wakeupGraceMs ?? DEFAULT_WAKEUP_GRACE_MS;
-        this.unconfirmedOutOfTurnWakeupDeadlineMs = Date.now() + graceMs;
-      }
+      this.unconfirmedOutOfTurnWakeup = this.brainReader.hasTranscript(this.sessionId);
+    } else {
+      this.unconfirmedOutOfTurnWakeup = false;
     }
-    this.refreshNoBrainOutOfTurnIdleDeadline();
+    this.refreshOutOfTurnIdleDeadlines();
     this.syncOutOfTurnTimer();
   }
 
@@ -1308,11 +1323,16 @@ export class AntigravitySession {
     if (this.client !== client || this.closed || this.starting) return;
     const failure = error ?? new Error('Antigravity exited unexpectedly.');
     const callbacks = this.options?.callbacks;
-    if (callbacks) this.abortBackgroundWork(callbacks, 'Antigravity exited unexpectedly');
+    for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
+    this.pendingPermissions.clear();
+    if (callbacks) {
+      this.settleUnfinishedAnnouncedTools(callbacks);
+      this.settleWakeupToolsAsError(callbacks);
+      this.abortBackgroundWork(callbacks, 'Antigravity exited unexpectedly');
+    }
     // The process is gone: further sends fail fast so the manager starts a fresh session instead of writing to a dead pipe.
     this.closed = true;
     this.resetTurnState();
-    this.pendingPermissions.clear();
     this.cancelPendingElicitations();
     this.bridge?.close();
     this.bridge = null;
@@ -1339,6 +1359,21 @@ export class AntigravitySession {
       case 'agent_message_chunk': {
         const text = update.content?.type === 'text' ? update.content.text : undefined;
         if (typeof text === 'string' && text) {
+          if (!this.acpPromptInFlight && !this.turnText.trim() && text.trim().length === 0) {
+            break;
+          }
+          if (!this.acpPromptInFlight && this.pendingOutOfTurnFinalTexts.length > 0 && text.trim().length > 0) {
+            const expected = this.pendingOutOfTurnFinalTexts[0];
+            const preview = this.pendingTools.length > 0 ? text : this.turnText + text;
+            const previewTrimStart = preview.trimStart();
+            const expectedTrimStart = expected.trimStart();
+            const isPrefixCompatible =
+              expectedTrimStart.startsWith(previewTrimStart) ||
+              preview.trim() === expected.trim();
+            if (!isPrefixCompatible) {
+              this.flushPendingOutOfTurnFinalTexts(callbacks);
+            }
+          }
           if (text.trim().length > 0) this.beginOutOfTurnWakeupIfIdle();
           if (this._turnInFlight) {
             this.wakeupErrorDeadlineMs = 0;
@@ -1362,7 +1397,7 @@ export class AntigravitySession {
                   this.outOfTurnFinalTextDeadlineMs = Date.now() + drainMs;
                 }
               }
-              this.refreshNoBrainOutOfTurnIdleDeadline();
+              this.refreshOutOfTurnIdleDeadlines();
               this.syncOutOfTurnTimer();
               if (!this.parentWakeupInFlight && this.pendingOutOfTurnFinalTexts.length === 0) {
                 // Defer until `AcpClient.receive()` finishes synchronously dispatching all lines in the current stdout chunk.
@@ -1382,7 +1417,7 @@ export class AntigravitySession {
             }
             this.beginOutOfTurnWakeupIfIdle();
           }
-          if (this._turnInFlight && !this.turnText) {
+          if (this._turnInFlight && !this.turnText.trim()) {
             this.wakeupErrorDeadlineMs = 0;
             this.turnThought += thought;
             const summary = extractAntigravityThoughtSummary(this.turnThought);
@@ -1390,12 +1425,15 @@ export class AntigravitySession {
               this.lastEmittedThoughtSummary = summary;
               callbacks.onThinking?.(summary);
             }
-            if (!this.acpPromptInFlight) this.refreshNoBrainOutOfTurnIdleDeadline();
+            if (!this.acpPromptInFlight) this.refreshOutOfTurnIdleDeadlines();
           }
         }
         break;
       }
       case 'tool_call':
+        if (!this.acpPromptInFlight && this.pendingOutOfTurnFinalTexts.length > 0) {
+          this.flushPendingOutOfTurnFinalTexts(callbacks);
+        }
         this.beginOutOfTurnWakeupIfIdle();
         this.handleTool(update as AcpToolCall, callbacks);
         break;
@@ -1485,7 +1523,7 @@ export class AntigravitySession {
         queueMicrotask(() => this.onBrainTick());
       }
     }
-    if (!this.acpPromptInFlight) this.refreshNoBrainOutOfTurnIdleDeadline();
+    if (!this.acpPromptInFlight) this.refreshOutOfTurnIdleDeadlines();
   }
 
   /** Close the current assistant message: its text and the tool calls that followed it. */
@@ -1582,6 +1620,7 @@ export class AntigravitySession {
     this.outOfTurnFinalTextDeadlineMs = 0;
     this.outOfTurnToolDrainDeadlineMs = 0;
     this.outOfTurnNoBrainIdleDeadlineMs = 0;
+    this.unconfirmedOutOfTurnWakeup = false;
     this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
     this.clearOutOfTurnDrainTimer();
     this.brainReader?.stopWatching();
@@ -1674,12 +1713,14 @@ export class AntigravitySession {
     }
     if (
       this.parentWakeupInFlight &&
+      this.unconfirmedOutOfTurnWakeup &&
       this.unconfirmedOutOfTurnWakeupDeadlineMs > 0 &&
       this.allAnnouncedToolsSettled() &&
       this.pendingPermissions.size === 0 &&
       this.pendingElicitations.size === 0 &&
       Date.now() >= this.unconfirmedOutOfTurnWakeupDeadlineMs
     ) {
+      this.unconfirmedOutOfTurnWakeup = false;
       this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
       this.parentWakeupInFlight = false;
     }
@@ -1757,9 +1798,11 @@ export class AntigravitySession {
     const steps = this.brainReader.readNewSteps(sessionId);
     for (const step of steps) {
       if (step.type === 'SYSTEM_MESSAGE') {
+        this.unconfirmedOutOfTurnWakeup = false;
         this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
         this.consumeParentWakeupStep(step, callbacks, true);
       } else if (step.type === 'PLANNER_RESPONSE') {
+        this.unconfirmedOutOfTurnWakeup = false;
         this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
         this.parentWakeupInFlight = true;
         this.wakeupErrorDeadlineMs = 0;
@@ -1819,11 +1862,15 @@ export class AntigravitySession {
               this.outOfTurnToolDrainDeadlineMs = Date.now() + drainMs;
             }
             const expectedTrimmed = typeof step.content === 'string' ? step.content.trim() : '';
-            const needsDrain = expectedTrimmed.length > 0 && this.turnText.trim().length < expectedTrimmed.length;
+            const matchesCurrentTurnText =
+              this.pendingOutOfTurnFinalTexts.length === 0 &&
+              expectedTrimmed.length > 0 &&
+              this.turnText.trim() === expectedTrimmed;
+            const needsDrain = expectedTrimmed.length > 0 && !matchesCurrentTurnText;
             if (needsDrain) {
               this.pendingOutOfTurnFinalTexts.push(step.content!);
               this.outOfTurnFinalTextDeadlineMs = Date.now() + drainMs;
-            } else {
+            } else if (this.pendingOutOfTurnFinalTexts.length === 0) {
               this.sawOutOfTurnPostToolText = false;
               this.flushText(callbacks);
             }
@@ -1831,6 +1878,8 @@ export class AntigravitySession {
           }
         }
       } else if (step.type === 'GENERIC') {
+        this.unconfirmedOutOfTurnWakeup = false;
+        this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
         this.wakeupErrorDeadlineMs = 0;
         this.harvestParentGenericStep(step, callbacks);
         if (streamFromBrain) {
@@ -1846,6 +1895,8 @@ export class AntigravitySession {
           this.refreshWakeupToolStallDeadline();
         }
       } else if (step.type === 'ERROR_MESSAGE' && this.parentWakeupInFlight) {
+        this.unconfirmedOutOfTurnWakeup = false;
+        this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
         // `agy` often retries stream hiccups on the next step; bound the wait if no retry arrives without clobbering
         // `wakeupGraceDeadlineMs` used by child wakeup tracking.
         const graceMs = this.brainOptions?.wakeupGraceMs ?? DEFAULT_WAKEUP_GRACE_MS;
@@ -1987,7 +2038,7 @@ export class AntigravitySession {
       this.parentWakeupInFlight = true;
       if (this.pendingWakeups === 0) this.wakeupGraceDeadlineMs = 0;
       this.wakeupErrorDeadlineMs = 0;
-      if (!this.turnText) this.sawOutOfTurnPostToolText = false;
+      if (!this.turnText.trim()) this.sawOutOfTurnPostToolText = false;
       callbacks.onRawEvent?.({ type: 'antigravity/wakeup_system_message', stepIndex: step.step_index, senders: parsed.senders });
     }
   }
@@ -2119,6 +2170,8 @@ export class AntigravitySession {
     this.settleWakeupToolsAsError(callbacks);
     this.flushText(callbacks);
     this.parentWakeupInFlight = false;
+    this.unconfirmedOutOfTurnWakeup = false;
+    this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
 
     client.notify('session/cancel', { sessionId });
     const settleMs = this.brainOptions?.wakeupCancelSettleMs ?? DEFAULT_WAKEUP_CANCEL_SETTLE_MS;
@@ -2146,6 +2199,10 @@ export class AntigravitySession {
       .then((result) => this.finishTurn(result))
       .catch((error) => {
         if (this.closed || !this._turnInFlight) return;
+        for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
+        this.pendingPermissions.clear();
+        this.settleUnfinishedAnnouncedTools(callbacks);
+        this.settleWakeupToolsAsError(callbacks);
         this.abortBackgroundWork(callbacks, 'Failed');
         this.cancelPendingElicitations();
         this.resetTurnState();
@@ -2198,6 +2255,9 @@ export class AntigravitySession {
     const cancelled = { outcome: { outcome: 'cancelled' } };
     if (!callbacks || this.closed) return cancelled;
     if (params?.sessionId && params.sessionId === this.sessionId && !this.loading) {
+      if (!this.acpPromptInFlight && this.pendingOutOfTurnFinalTexts.length > 0) {
+        this.flushPendingOutOfTurnFinalTexts(callbacks);
+      }
       this.beginOutOfTurnWakeupIfIdle();
       this.wakeupErrorDeadlineMs = 0;
     }
@@ -2225,12 +2285,12 @@ export class AntigravitySession {
         answered = true;
         this.pendingPermissions.delete(key);
         this.refreshWakeupToolStallDeadline();
-        this.refreshNoBrainOutOfTurnIdleDeadline();
+        this.refreshOutOfTurnIdleDeadlines();
         resolve(outcome);
       };
       this.pendingPermissions.set(key, (outcome) => settle(outcome.outcome === 'cancelled' ? cancelled : outcome));
       this.refreshWakeupToolStallDeadline();
-      this.refreshNoBrainOutOfTurnIdleDeadline();
+      this.refreshOutOfTurnIdleDeadlines();
       callbacks.onPermissionRequest(`Antigravity: ${antigravityToolName(tool.name, kind, tool.rawInput ?? tool.args)}`, antigravityPermissionDetail(tool))
         .then((allow) => settle(allow ? select('allow_once', 'allow') : select('reject_once', 'deny')))
         .catch(() => settle(select('reject_once', 'deny')));
@@ -2242,6 +2302,9 @@ export class AntigravitySession {
     const callbacks = this.options?.callbacks;
     if (!callbacks || this.closed) return { action: 'cancel' };
     if (params?.sessionId && params.sessionId === this.sessionId && !this.loading) {
+      if (!this.acpPromptInFlight && this.pendingOutOfTurnFinalTexts.length > 0) {
+        this.flushPendingOutOfTurnFinalTexts(callbacks);
+      }
       this.beginOutOfTurnWakeupIfIdle();
       this.wakeupErrorDeadlineMs = 0;
     }
@@ -2268,12 +2331,12 @@ export class AntigravitySession {
         answered = true;
         this.pendingElicitations.delete(key);
         this.refreshWakeupToolStallDeadline();
-        this.refreshNoBrainOutOfTurnIdleDeadline();
+        this.refreshOutOfTurnIdleDeadlines();
         resolve(result);
       };
       this.pendingElicitations.set(key, settle);
       this.refreshWakeupToolStallDeadline();
-      this.refreshNoBrainOutOfTurnIdleDeadline();
+      this.refreshOutOfTurnIdleDeadlines();
       callbacks.onAskUserQuestion(fields.map((field) => field.askQuestion))
         .then((answers) => settle(buildAntigravityElicitationReply(fields, answers)))
         .catch(() => settle({ action: 'cancel' }));

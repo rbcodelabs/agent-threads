@@ -2251,4 +2251,117 @@ describe('AntigravitySession mid-wakeup deadline isolation and agy 1.5.11+ out-o
     expect(h.done.mock.calls[1][3]).toEqual({ userMessageUuid: 'user-uuid-42' });
     expect(h.messages).toEqual(['Fresh spontaneous note.', 'Hello from Antigravity.']);
   });
+
+  it('preserves FIFO wakeup boundaries when pendingOutOfTurnFinalTexts overlaps a new wakeup chunk/tool or trailing newline', async () => {
+    const h = makeHarness({
+      env: { FAKE_ACP_SERVER_VERSION: '1.5.11' },
+      brainOptions: { pollIntervalMs: 15, wakeupGraceMs: 250, outOfTurnTextDrainMs: 300 },
+    });
+    await h.session.start(h.options);
+    h.session.send('SUBAGENT_BRAIN fifo-oot');
+    await vi.waitFor(() => expect(h.tasksStarted).toContainEqual(expect.objectContaining({ taskId: 'child-sub-1' })), { timeout: 10_000 });
+    const sid = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+    const subHeader = 'Created the ' + 'following subagent:';
+
+    // Wakeup 1 spawns `sub-q2` and finishes on disk WITHOUT emitting its stdout chunk (`pendingOutOfTurnFinalTexts = ['Wakeup 1 omitted.']`),
+    // followed by a stray whitespace-only chunk (`\n`).
+    h.appendBrain('child-sub-1', [{ step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Q1 done.' }]);
+    h.appendBrain('sub-q2', [{ step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'IN_PROGRESS', thinking: 'Q2 working' }]);
+    h.appendBrain(sid, [
+      { step_index: 4, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=child-sub-1\nQ1 done.' },
+      {
+        step_index: 5,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [{ name: 'invoke_subagent', args: { TypeName: 'research', Role: 'Q2', Prompt: 'two' } }],
+      },
+      { step_index: 6, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: `${subHeader}\n{\n  "conversationId": "sub-q2"\n}` },
+      { step_index: 7, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Wakeup 1 omitted.' },
+    ]);
+    await new Promise((r) => setTimeout(r, 40));
+    h.session.handleSessionUpdate({
+      sessionId: sid,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '\n' } },
+    });
+
+    // Wakeup 2 starts BEFORE the 300ms drain expires with a thought + longer incompatible `agent_message_chunk`,
+    // AND Wakeup 3 (led by a tool_call before drain) also lands rapidly on disk while Wakeup 2 is only half-streamed!
+    h.session.handleSessionUpdate({
+      sessionId: sid,
+      update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: '**Synthesizing Q2**\nChecking Q2.' } },
+    });
+    h.session.handleSessionUpdate({
+      sessionId: sid,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Wakeup 2 longer first ' } },
+    });
+    h.appendBrain('sub-q2', [{ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Q2 done.' }]);
+    h.appendBrain(sid, [
+      { step_index: 8, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=sub-q2\nQ2 done.' },
+      { step_index: 9, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Wakeup 2 longer first half and second half.' },
+      { step_index: 10, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=timer-1\nTimer.' },
+      { step_index: 11, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Short 3.' },
+    ]);
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Deliver the rest of Wakeup 2, then Wakeup 3!
+    h.session.handleSessionUpdate({
+      sessionId: sid,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'half and second half.' } },
+    });
+    h.session.handleSessionUpdate({
+      sessionId: sid,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Short 3.' } },
+    });
+
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    expect(h.thoughts).toContain('Checking Q2.');
+    expect(h.messages.map((m) => m.trim()).filter(Boolean)).toEqual([
+      'Waiting on Auth Researcher.',
+      'Wakeup 1 omitted.',
+      'Wakeup 2 longer first half and second half.',
+      'Short 3.',
+    ]);
+  });
+
+  it('settles announced tools on session/prompt RPC error and refreshes unconfirmed wakeup deadline across active chunks', async () => {
+    const h = makeHarness({
+      env: { FAKE_ACP_SERVER_VERSION: '1.5.11' },
+      brainOptions: { pollIntervalMs: 15, wakeupGraceMs: 60 },
+    });
+    await h.session.start(h.options);
+    const sid = 'fake-session-1';
+
+    // Turn 1 rejects with a JSON-RPC error mid-tool; `rpc-err-tool-1` MUST settle as `'error'` so `allAnnouncedToolsSettled()` stays clean.
+    await h.turn('PROMPT_RPC_ERROR_WITH_TOOL');
+    expect(h.events).toEqual(['error']);
+    expect(h.toolResults).toContainEqual(['rpc-err-tool-1', 'error']);
+
+    h.appendBrain(sid, [
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'init' },
+    ]);
+
+    // Now simulate an unconfirmed out-of-turn wakeup (transcript exists on disk, but no new steps arrive) that streams
+    // across 3 x 35ms = 105ms (> 60ms `wakeupGraceMs`): active chunks must keep it alive until streaming goes idle!
+    h.session.handleSessionUpdate({
+      sessionId: sid,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Chunk A ' } },
+    });
+    await new Promise((r) => setTimeout(r, 35));
+    expect(h.session.turnInFlight).toBe(true);
+    h.session.handleSessionUpdate({
+      sessionId: sid,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Chunk B ' } },
+    });
+    await new Promise((r) => setTimeout(r, 35));
+    expect(h.session.turnInFlight).toBe(true);
+    h.session.handleSessionUpdate({
+      sessionId: sid,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Chunk C.' } },
+    });
+
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+    expect(h.messages).toEqual(['Chunk A Chunk B Chunk C.']);
+  });
 });

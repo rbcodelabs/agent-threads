@@ -374,6 +374,17 @@ async function handle(message) {
     case 'session/prompt': {
       cancelledDuringPrompt = false;
       const text = (params.prompt ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('\n');
+      if (text.includes('PROMPT_RPC_ERROR_WITH_TOOL')) {
+        update(String(params.sessionId), {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'rpc-err-tool-1',
+          name: 'read_file',
+          kind: 'read',
+          status: 'in_progress',
+        });
+        write({ jsonrpc: '2.0', id, error: { code: -32000, message: 'transient model error' } });
+        return;
+      }
       const result = await runPrompt(String(params.sessionId), text);
       ok(result);
       return;
