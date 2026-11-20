@@ -44,16 +44,17 @@ export function buildProjectOverviewContext(overview: { path: string; content: s
 
 /**
  * Composes the per-thread appended system prompt. Order is fixed:
- * environment, Project description, Project overview, active goal.
+ * environment, Project description, Project overview, orchestrator charter (if any), active goal.
  * thread.managerNotes / proposedReply are intentionally never passed in.
  */
 export function composeAppendSystemPrompt(parts: {
   envContext?: string;
   projectDesc?: string;
   overviewContext?: string;
+  orchestratorCharter?: string;
   goalContext?: string;
 }): string {
-  return [parts.envContext, parts.projectDesc, parts.overviewContext, parts.goalContext]
+  return [parts.envContext, parts.projectDesc, parts.overviewContext, parts.orchestratorCharter, parts.goalContext]
     .filter(Boolean)
     .join('\n\n');
 }

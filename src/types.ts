@@ -639,6 +639,12 @@ export interface Thread {
    */
   disallowedTools?: string[];
   /**
+   * Message index recorded by `ThreadManager.resetThreadSession()` so the next
+   * unresumed session starts with zero pre-reset history in `buildHistoryPreamble`
+   * while preserving the full visible transcript in the UI.
+   */
+  contextResetAtMessageCount?: number;
+  /**
    * Background tasks (Bash run_in_background: true) that started during a session
    * but didn't emit a task_notification before the stream ended. The plugin polls
    * these automatically and clears them when completions arrive.
