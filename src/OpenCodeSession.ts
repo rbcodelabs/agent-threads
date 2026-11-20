@@ -74,6 +74,8 @@ export function openCodePermissionConfig(disallowedTools?: readonly string[]): R
   if (isShellDenied(disallowedTools)) config.bash = 'deny';
   // Same for file edits (a daemon read-only workspace): the `edit` permission covers edit, write and patch.
   if (isEditDenied(disallowedTools)) config.edit = 'deny';
+  if (disallowedTools?.some(t => t === 'Task' || t === 'Agent')) config.task = 'deny';
+  if (disallowedTools?.includes('AskUserQuestion')) config.question = 'deny';
   return config;
 }
 
@@ -153,6 +155,15 @@ export function openCodePermissionRules(disallowedTools?: readonly string[]): Ar
   rules.push({ action: `${OPENCODE_HOST_TOOLS_SERVER}_*`, resource: '*', effect: 'allow' });
   if (isShellDenied(disallowedTools)) {
     rules.push({ action: 'shell', resource: '*', effect: 'deny' }, { action: 'bash', resource: '*', effect: 'deny' });
+  }
+  if (isEditDenied(disallowedTools)) {
+    rules.push({ action: 'edit', resource: '*', effect: 'deny' });
+  }
+  if (disallowedTools?.some(t => t === 'Task' || t === 'Agent')) {
+    rules.push({ action: 'task', resource: '*', effect: 'deny' });
+  }
+  if (disallowedTools?.includes('AskUserQuestion')) {
+    rules.push({ action: 'question', resource: '*', effect: 'deny' });
   }
   return rules;
 }

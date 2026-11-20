@@ -13,9 +13,15 @@ import {
   buildOrchestratorCharter,
   buildOrchestratorGoalContext,
   parseManagerNotesTriage,
+  resolveOrchestratorLedgerPath,
+  sanitizeInlineRoleLabel,
+  sanitizeLedgerSegment,
 } from '../../src/orchestratorCharter';
+import { canWriteManagerNotes } from '../../src/coordinationScope';
+import { openCodePermissionConfig, openCodePermissionRules } from '../../src/OpenCodeSession';
 import { composeAppendSystemPrompt } from '../../src/projectOverview';
 import { withCreatorToolRestrictions } from '../../src/toolRestrictions';
+import * as HarnessFactory from '../../src/HarnessFactory';
 import { ThreadManager } from '../../src/ThreadManager';
 import { createThreadTools } from '../../src/tools/threads';
 import { createScheduleTools } from '../../src/tools/schedule';
@@ -108,6 +114,24 @@ describe('orchestratorCharter pure helpers', () => {
       .replace('Staged: none', 'Staged: decision dec-1');
     expect(parseManagerNotesTriage(waitingAlreadyStaged, 5000).needsReview).toBe(false);
 
+    // Stale Staged for update from an earlier turn (4000 !== 5000) still requires review, even when Disposition is backticked
+    const staleStaged = waitingUnstaged
+      .replace('Staged for update: none', 'Staged for update: 4000')
+      .replace('Disposition: needs-decision', 'Disposition: `Needs-Decision`');
+    expect(parseManagerNotesTriage(staleStaged, 5000)).toMatchObject({
+      disposition: 'needs-decision',
+      stagedForUpdate: 4000,
+      needsReview: true,
+    });
+
+    // Sanitization guards against dot segments, slashes, and newline prompt injection
+    expect(sanitizeLedgerSegment('.')).toBe('Project');
+    expect(sanitizeLedgerSegment('..')).toBe('Project');
+    expect(sanitizeLedgerSegment('a/b\\c')).toBe('a-b-c');
+    expect(sanitizeInlineRoleLabel('Compass\n## Injected')).toBe('Compass ## Injected');
+    expect(resolveOrchestratorLedgerPath(null)).toBe('Products/Portfolio/orchestrator-ledger.md');
+    expect(resolveOrchestratorLedgerPath('.')).toBe('Products/Project/orchestrator-ledger.md');
+
     // Legacy notes format
     const legacy = 'Orchestrator-tracked goal: Ship fix\nLast reviewed: 2026-11-01\nStatus: Done';
     const parsedLegacy = parseManagerNotesTriage(legacy, 5000);
@@ -147,7 +171,9 @@ describe('ThreadManager orchestrator session options, non-inherited tool lockout
 
   it('injects Charter, reframes /goal, locks out worker tools on orchestrators, and NEVER taints spawned worker threads', () => {
     const settings = { ...DEFAULT_SETTINGS, defaultCwd: tmpDir };
-    const manager = new ThreadManager(settings, tmpDir, path.join(tmpDir, 'plugin-res'));
+    const manager = new ThreadManager(settings);
+    manager.vaultRoot = tmpDir;
+    manager.pluginResourceDir = path.join(tmpDir, 'plugin-res');
     manager.peerSkills.register(
       { pluginId: 'threads-orchestrator' },
       { name: 'thread-orchestrator', description: 'Orchestrate threads', content: '# Skill' },
@@ -192,7 +218,8 @@ describe('ThreadManager orchestrator session options, non-inherited tool lockout
   });
 
   it('resets an orchestrator session cleanly: clears sessionId & resumeFallbackHistory, bumps generation, and adds notice', () => {
-    const manager = new ThreadManager({ ...DEFAULT_SETTINGS, defaultCwd: tmpDir }, tmpDir);
+    const manager = new ThreadManager({ ...DEFAULT_SETTINGS, defaultCwd: tmpDir });
+    manager.vaultRoot = tmpDir;
     const orch = manager.createThread('Portfolio Orchestrator', tmpDir);
     orch.sessionId = 'sess-old-4793';
     orch.messages.push({ id: 'm1', role: 'user', content: 'Old turn', timestamp: 100 });
@@ -209,6 +236,61 @@ describe('ThreadManager orchestrator session options, non-inherited tool lockout
     const optsAfter = buildOpts(manager, orch.id);
     expect(optsAfter.resume).toBeUndefined();
     expect(optsAfter.resumeFallbackHistory).toBeUndefined();
+
+    // OpenCode v1 & v2 enforce shell, bash, edit, task, and question lockout on ORCHESTRATOR_ROLE_DISALLOWED_TOOLS
+    expect(openCodePermissionConfig(ORCHESTRATOR_ROLE_DISALLOWED_TOOLS)).toMatchObject({
+      bash: 'deny',
+      edit: 'deny',
+      task: 'deny',
+      question: 'deny',
+    });
+    const rulesV2 = openCodePermissionRules(ORCHESTRATOR_ROLE_DISALLOWED_TOOLS);
+    expect(rulesV2).toContainEqual({ action: 'shell', resource: '*', effect: 'deny' });
+    expect(rulesV2).toContainEqual({ action: 'edit', resource: '*', effect: 'deny' });
+    expect(rulesV2).toContainEqual({ action: 'task', resource: '*', effect: 'deny' });
+    expect(rulesV2).toContainEqual({ action: 'question', resource: '*', effect: 'deny' });
+  });
+
+  it('refuses resetThreadSession while running and prevents pre-reset history replay on subsequent sendMessage', async () => {
+    const sentPrompts: string[] = [];
+    const spy = vi.spyOn(HarnessFactory, 'createHarnessSession').mockImplementation(() => ({
+      start: vi.fn().mockResolvedValue(undefined),
+      send: vi.fn((prompt: string) => {
+        sentPrompts.push(prompt);
+      }),
+      close: vi.fn(),
+      interrupt: vi.fn().mockResolvedValue(undefined),
+      isRunning: () => false,
+      turnInFlight: false,
+    }) as never);
+    try {
+      const manager = new ThreadManager({ ...DEFAULT_SETTINGS, defaultCwd: tmpDir });
+      manager.vaultRoot = tmpDir;
+      const orch = manager.createThread('Portfolio Orchestrator', tmpDir);
+      orch.sessionId = 'sess-bloated';
+      orch.messages.push(
+        { id: 'u1', role: 'user', content: 'PRE_RESET_SECRET_USER_TURN', timestamp: 10 },
+        { id: 'a1', role: 'assistant', content: 'PRE_RESET_SECRET_ASSISTANT_TURN', timestamp: 20 },
+      );
+
+      // Simulate active turn -> resetThreadSession must refuse
+      vi.spyOn(manager, 'isRunning').mockReturnValueOnce(true);
+      expect(manager.resetThreadSession(orch.id)).toBe(false);
+      expect(orch.sessionId).toBe('sess-bloated');
+
+      // Idle -> reset succeeds and records contextResetAtMessageCount
+      expect(manager.resetThreadSession(orch.id)).toBe(true);
+      expect(orch.contextResetAtMessageCount).toBe(orch.messages.length);
+
+      await manager.sendMessage(orch.id, 'Fresh heartbeat after reset');
+      expect(sentPrompts).toHaveLength(1);
+      expect(sentPrompts[0]).toContain('Fresh heartbeat after reset');
+      expect(sentPrompts[0]).not.toContain('PRE_RESET_SECRET_USER_TURN');
+      expect(sentPrompts[0]).not.toContain('PRE_RESET_SECRET_ASSISTANT_TURN');
+      expect(sentPrompts[0]).not.toContain('Prior conversation history');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
@@ -337,5 +419,78 @@ describe('ScheduleWakeup orchestrator guard & threads_get / threads_list triage 
     const fullList = JSON.parse((await invoke(tools, 'obsidian_list_threads', { projectId: 'p1' })).content[0]!.text!);
     expect(fullList[0].managerNotes).toBe(sampleNotes);
     expect(fullList[0].proposedReply.text).toContain('Very long drafted reply');
+  });
+
+  it('enforces disabled-Project note/ledger write scope and serves threads_get_ledger & threads_set_ledger', async () => {
+    const projects = [
+      { id: 'p-enabled', orchestratorEnabled: undefined },
+      { id: 'p-disabled', orchestratorEnabled: false },
+    ];
+    // Portfolio cannot write notes on an enabled Project even with elevatedProjectId
+    expect(canWriteManagerNotes({ kind: 'portfolio' }, 'p-enabled', 'p-enabled', projects)).toBe(false);
+    // Portfolio CAN write notes/ledger on a disabled Project when elevatedProjectId matches
+    expect(canWriteManagerNotes({ kind: 'portfolio' }, 'p-disabled', 'p-disabled', projects)).toBe(true);
+    expect(canWriteManagerNotes({ kind: 'portfolio' }, 'p-disabled', undefined, projects)).toBe(false);
+    // Project orchestrator owns its own Project
+    expect(canWriteManagerNotes({ kind: 'project-orchestrator', projectId: 'p-enabled' }, 'p-enabled', undefined, projects)).toBe(true);
+
+    let ledgerContent = '';
+    const tools = createThreadTools({
+      options: {
+        threadId: 'orch-portfolio',
+        getOrchestratorLedger: async ({ projectId, elevatedProjectId }) => {
+          const target = projectId === null ? undefined : projectId;
+          if (target && elevatedProjectId !== target) throw new Error('Target is outside coordination scope.');
+          return {
+            path: resolveOrchestratorLedgerPath(target ? 'Disabled Proj' : null),
+            exists: ledgerContent.length > 0,
+            content: ledgerContent,
+          };
+        },
+        setOrchestratorLedger: async ({ content, projectId, elevatedProjectId }) => {
+          const target = projectId === null ? undefined : projectId;
+          if (!canWriteManagerNotes({ kind: 'portfolio' }, target, elevatedProjectId, projects)) {
+            throw new Error('Target is outside coordination scope.');
+          }
+          ledgerContent = content;
+          return {
+            path: resolveOrchestratorLedgerPath(target ? 'Disabled Proj' : null),
+            bytes: Buffer.byteLength(content, 'utf8'),
+          };
+        },
+      },
+    });
+
+    // Portfolio writes its own ledger
+    const writePortfolio = JSON.parse((await invoke(tools, 'threads_set_ledger', { content: '# Wave 1\n- PR #1' })).content[0]!.text!);
+    expect(writePortfolio).toMatchObject({
+      success: true,
+      path: 'Products/Portfolio/orchestrator-ledger.md',
+    });
+    const readPortfolio = JSON.parse((await invoke(tools, 'threads_get_ledger', {})).content[0]!.text!);
+    expect(readPortfolio).toEqual({
+      path: 'Products/Portfolio/orchestrator-ledger.md',
+      exists: true,
+      content: '# Wave 1\n- PR #1',
+    });
+
+    // Portfolio denied writing enabled Project's ledger even with elevation
+    const deniedEnabled = await invoke(tools, 'threads_set_ledger', {
+      content: 'intrude',
+      projectId: 'p-enabled',
+      elevatedProjectId: 'p-enabled',
+    });
+    expect(deniedEnabled.isError).toBe(true);
+
+    // Portfolio allowed writing disabled Project's ledger with matching elevatedProjectId
+    const writeDisabled = JSON.parse((await invoke(tools, 'threads_set_ledger', {
+      content: '# Disabled fallback ledger',
+      projectId: 'p-disabled',
+      elevatedProjectId: 'p-disabled',
+    })).content[0]!.text!);
+    expect(writeDisabled).toMatchObject({
+      success: true,
+      path: 'Products/Disabled Proj/orchestrator-ledger.md',
+    });
   });
 });

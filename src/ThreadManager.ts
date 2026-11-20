@@ -1944,26 +1944,50 @@ export class ThreadManager {
   }
 
   /**
-   * Resets a thread's underlying harness session so the next turn starts with a
-   * fresh context window (resume = undefined, no fallback history), while keeping
-   * the visible message transcript, thread ID, Project assignment, and /goal intact.
+   * Messages eligible for fallback history replay on an unresumed session,
+   * excluding anything before the most recent `resetThreadSession()` boundary.
+   */
+  private messagesAfterContextReset(thread: Thread, dropLast = false): ChatMessage[] {
+    const end = dropLast ? Math.max(0, thread.messages.length - 1) : thread.messages.length;
+    const start = Math.min(Math.max(0, thread.contextResetAtMessageCount ?? 0), end);
+    return thread.messages.slice(start, end);
+  }
+
+  /**
+   * Resets an idle thread's underlying harness session so the next turn starts with
+   * a genuinely fresh context window (`resume = undefined` and zero pre-reset
+   * fallback history), while keeping the visible message transcript, thread ID,
+   * Project assignment, and `/goal` intact. Returns `false` if the thread does not
+   * exist or is actively running a turn.
    */
   resetThreadSession(threadId: string): boolean {
     const thread = this.threads.get(threadId);
-    if (!thread) return false;
+    if (!thread || this.isRunning(threadId)) return false;
     thread.sessionGeneration = (thread.sessionGeneration ?? 0) + 1;
     delete thread.sessionId;
     delete thread.pendingHarnessHandoff;
     delete thread.pendingBackgroundTasks;
+    delete thread.tasks;
     delete thread.usageSnapshot;
+    delete thread.lastError;
+    if (thread.remote) {
+      delete thread.remote.nativeSessionId;
+      delete thread.remote.turnPending;
+    }
+    this.sessionRestartRequested.delete(threadId);
+    this.threadActivity.delete(threadId);
     const oldSession = this.sessions.get(threadId);
     if (oldSession) {
       oldSession.close();
       this.sessions.delete(threadId);
     }
     this.selectedAgentRuns.delete(threadId);
-    if (thread.status === 'active') thread.status = 'waiting';
+    if (thread.status === 'active' || thread.status === 'reconnecting' || thread.status === 'error') {
+      thread.status = 'waiting';
+    }
     this.addNoticeMessage(threadId, 'completed', 'Session context reset — next turn starts with a fresh context window.');
+    thread.contextResetAtMessageCount = thread.messages.length;
+    this.emit(threadId, { type: 'tasks_updated', tasks: [] });
     this.emit(threadId, { type: 'run_state_settled' });
     return true;
   }
@@ -2187,7 +2211,7 @@ export class ThreadManager {
       return false;
     }
 
-    const priorMessages = thread.messages;
+    const priorMessages = this.messagesAfterContextReset(thread, false);
     const effectivePrompt = !thread.sessionId && priorMessages.length > 0
       ? buildHistoryPreamble(priorMessages, thread.cwd) + message
       : message;
@@ -2396,11 +2420,14 @@ export class ThreadManager {
       return;
     }
 
-    // If there is no session to resume but there IS prior history, the cwd must
-    // have changed mid-conversation (via obsidian_set_working_directory). Inject
-    // the prior turns as a preamble so Claude isn't amnesiac after the switch.
-    const priorMessages = thread.messages.slice(0, -1); // excludes the just-pushed user msg
+    // If there is no session to resume but there IS prior history after the most
+    // recent context reset, the cwd must have changed mid-conversation (via
+    // obsidian_set_working_directory). Inject post-reset turns as a preamble so
+    // Claude isn't amnesiac after the switch, while keeping resetThreadSession()
+    // genuinely fresh.
+    const priorMessages = this.messagesAfterContextReset(thread, true); // excludes pre-reset msgs and the just-pushed user msg
     const isFreshUnresumedSession = !thread.sessionId && priorMessages.length > 0;
+    const hasPostResetStart = !thread.sessionId && (priorMessages.length > 0 || (thread.contextResetAtMessageCount ?? 0) > 0);
     const handoffPrompt = claimedHandoff
       ? buildHarnessHandoffPrompt(thread, claimedHandoff.sourceHarness, claimedHandoff.targetHarness)
       : undefined;
@@ -2419,7 +2446,7 @@ export class ThreadManager {
     // ID, so a leftover incomplete task silently gets its content overwritten
     // and flipped to whatever status the new session's same-ID task reaches.
     // Clear both so the new session starts with a clean board.
-    if (isFreshUnresumedSession) {
+    if (hasPostResetStart) {
       delete thread.tasks;
       delete thread.pendingBackgroundTasks;
       this.emit(threadId, { type: 'tasks_updated', tasks: [] });
@@ -2668,10 +2695,10 @@ export class ThreadManager {
         : modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
       appendSystemPrompt,
       resumeFallbackHistory: thread.sessionId
-        ? buildHistoryPreamble(
-            latestMessageIsCurrentSend ? thread.messages.slice(0, -1) : thread.messages,
-            thread.cwd,
-          )
+        ? (() => {
+            const fallbackMsgs = this.messagesAfterContextReset(thread, latestMessageIsCurrentSend);
+            return fallbackMsgs.length > 0 ? buildHistoryPreamble(fallbackMsgs, thread.cwd) : undefined;
+          })()
         : undefined,
       secretEnv: resolvedSecretEnv,
       claude: {
@@ -2768,10 +2795,10 @@ export class ThreadManager {
       callbacks: this.buildSessionCallbacks(threadId, thread),
       appendSystemPrompt,
       resumeFallbackHistory: resume
-        ? buildHistoryPreamble(
-            latestMessageIsCurrentSend ? thread.messages.slice(0, -1) : thread.messages,
-            remote.remoteCwd,
-          )
+        ? (() => {
+            const fallbackMsgs = this.messagesAfterContextReset(thread, latestMessageIsCurrentSend);
+            return fallbackMsgs.length > 0 ? buildHistoryPreamble(fallbackMsgs, remote.remoteCwd) : undefined;
+          })()
         : undefined,
     };
     const passthrough = Object.keys(partition.passthrough).length ? partition.passthrough : undefined;

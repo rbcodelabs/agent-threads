@@ -297,6 +297,10 @@ export interface ObsidianMcpServerOptions {
   requestDeferredArchive?: (id: string) => void;
   /** Sets (or clears, with an empty string) a thread's orchestrator tracking notes. */
   setThreadNotes?: (threadId: string, notes: string) => void;
+  /** Reads the caller-authorized Tier 2 orchestrator campaign ledger note in the vault. */
+  getOrchestratorLedger?: (params: { projectId?: string | null; elevatedProjectId?: string }) => Promise<{ path: string; exists: boolean; content: string }>;
+  /** Writes (or clears with an empty string) the caller-owned Tier 2 orchestrator campaign ledger note in the vault. */
+  setOrchestratorLedger?: (params: { content: string; projectId?: string | null; elevatedProjectId?: string }) => Promise<{ path: string; bytes: number }>;
   /** Sets an AI-proposed reply awaiting human approval on a thread. */
   setThreadProposedReply?: (threadId: string, text: string) => void;
   /** Clears a thread's pending proposed reply, if any. */
@@ -669,7 +673,7 @@ export function toHarnessDynamicTools(
   const readOnlyToolNames = new Set([
     ...legacyReadOnlyToolNames,
     // Canonical-only sync and thread-inspection tools (no legacy alias); sync_resolve_conflict is deliberately absent: it mutates.
-    'sync_list_conflicts', 'sync_inspect_conflict', 'threads_get',
+    'sync_list_conflicts', 'sync_inspect_conflict', 'threads_get', 'threads_get_ledger',
     ...legacyReadOnlyToolNames.map(name => LEGACY_TO_CANONICAL_TOOL_NAMES[name] ?? name),
     // Observing a page is read-only; navigating to one and clicking things is
     // not, so only the inspection half bypasses the prompt.

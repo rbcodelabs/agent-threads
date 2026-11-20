@@ -78,7 +78,7 @@ export const NEVER_OFFERED: ReadonlySet<string> = new Set([
   'vault_restore_file_version', 'vault_add_bridge', 'vault_move', 'sync_resolve_conflict',
   // thread creation, messaging, archiving and every setter
   'threads_create', 'threads_create_project', 'threads_update_project', 'threads_set_project', 'threads_open',
-  'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_proposed_reply', 'threads_clear_proposed_reply', 'threads_post_decision', 'threads_clear_decision',
+  'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_ledger', 'threads_set_proposed_reply', 'threads_clear_proposed_reply', 'threads_post_decision', 'threads_clear_decision',
   // Portfolio-only orchestrator management (reads and mutates local orchestrator state)
   'threads_list_orchestrators', 'threads_set_orchestrator_enabled',
   // skills that install, create, update, uninstall or fetch

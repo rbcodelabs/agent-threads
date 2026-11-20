@@ -14,7 +14,7 @@ import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 type ToolDef = SdkMcpToolDefinition<any>;
 
 export interface ThreadToolsPort {
-  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeOrchestratorManagement' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadDecision' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'listOrchestrators' | 'openThread' | 'postThreadDecision' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setProjectOrchestratorEnabled' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
+  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeOrchestratorManagement' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadDecision' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorLedger' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'listOrchestrators' | 'openThread' | 'postThreadDecision' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setOrchestratorLedger' | 'setProjectOrchestratorEnabled' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
 }
 
 
@@ -531,7 +531,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     {
       threadId: z.string().describe('ID of the thread to annotate'),
       notes: z.string().describe('Tracking notes text. Pass an empty string to clear existing notes.'),
-      elevatedProjectId: z.string().optional().describe('Reserved for explicit portfolio reads; portfolio elevation cannot write Project notes.'),
+      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: pass the Project ID to write notes when that Project\'s orchestrator is disabled (enabled: false).'),
     },
     async (args, _extra) => {
       try {
@@ -733,6 +733,51 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     },
   );
 
+  const MAX_LEDGER_CHARS = 65_536;
+
+  const boundGetLedger = tool(
+    'threads_get_ledger',
+    'Reads the Tier 2 cross-thread campaign ledger note in the vault (Products/<Project>/orchestrator-ledger.md, or Products/Portfolio/orchestrator-ledger.md for unassigned portfolio scope). Defaults to the caller\'s Project when projectId is omitted.',
+    {
+      projectId: z.string().nullable().optional().describe('Optional Project ID (or null for Portfolio ledger). Omit to read your own scope\'s ledger.'),
+      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation when reading a Project ledger.'),
+    },
+    async (args, _extra) => {
+      try {
+        if (!options.getOrchestratorLedger) return toolError('Orchestrator ledger is not available in this context.');
+        const res = await options.getOrchestratorLedger({ projectId: args.projectId, elevatedProjectId: args.elevatedProjectId });
+        return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
+      } catch (err: unknown) {
+        return toolError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    { alwaysLoad: true },
+  );
+
+  const boundSetLedger = tool(
+    'threads_set_ledger',
+    'Writes (or clears with an empty string) the caller-owned Tier 2 cross-thread campaign ledger note in the vault (Products/<Project>/orchestrator-ledger.md or Products/Portfolio/orchestrator-ledger.md). Use this instead of filesystem Write/Edit to maintain PR waves, cross-thread blockers, and merge order.',
+    {
+      content: z.string().max(MAX_LEDGER_CHARS).describe('Markdown ledger content (max 64 KiB). Pass an empty string to clear.'),
+      projectId: z.string().nullable().optional().describe('Optional Project ID (or null for Portfolio ledger). Omit to write your own scope\'s ledger.'),
+      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: pass the Project ID when writing a disabled Project\'s ledger.'),
+    },
+    async (args, _extra) => {
+      try {
+        if (!options.setOrchestratorLedger) return toolError('Orchestrator ledger is not available in this context.');
+        const res = await options.setOrchestratorLedger({
+          content: args.content,
+          projectId: args.projectId,
+          elevatedProjectId: args.elevatedProjectId,
+        });
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, ...res }, null, 2) }] };
+      } catch (err: unknown) {
+        return toolError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    { alwaysLoad: true },
+  );
+
   const toolDefs: Array<ToolDef | undefined> = [
     boundCreateThread as ToolDef | undefined,
     boundGetCurrentThread as ToolDef | undefined,
@@ -755,6 +800,8 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     boundClearThreadDecision as ToolDef | undefined,
     boundListOrchestrators as ToolDef | undefined,
     boundSetOrchestratorEnabled as ToolDef | undefined,
+    boundGetLedger as ToolDef | undefined,
+    boundSetLedger as ToolDef | undefined,
   ];
   const toolNames = [
     'threads_create',
@@ -778,6 +825,8 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     'obsidian_clear_thread_decision',
     'threads_list_orchestrators',
     'threads_set_orchestrator_enabled',
+    'threads_get_ledger',
+    'threads_set_ledger',
   ];
   return Object.fromEntries(toolNames.flatMap((name, i): Array<[string, ToolDef]> => (toolDefs[i] ? [[name, toolDefs[i]!]] : [])));
 }

@@ -1,6 +1,6 @@
 /**
  * Pure orchestrator charter, campaign-goal reframing, role-scoped tool lockout,
- * and Manager notes v2 triage parser.
+ * ledger path resolution, and Manager notes v2 triage parser.
  *
  * Zero `obsidian` or DOM imports: safe in the daemon core closure.
  */
@@ -28,6 +28,8 @@ export const ORCHESTRATOR_ROLE_DISALLOWED_TOOLS: readonly string[] = Object.free
   'ScheduleWakeup',
 ]);
 
+const MAX_TRIAGE_FIELD_CHARS = 240;
+
 export interface ManagerNotesTriage {
   notesVersion: 'v2' | 'legacy' | 'none';
   outcome?: string;
@@ -40,31 +42,49 @@ export interface ManagerNotesTriage {
   /**
    * True when the thread has no notes yet, its `updatedAt` moved past
    * `Last reviewed update`, or it is in `needs-decision` without anything
-   * staged/answered for the current `updatedAt`.
+   * staged/answered for the exact current `updatedAt`.
    */
   needsReview: boolean;
 }
 
-function sanitizeLedgerSegment(name: string): string {
-  const cleaned = name.replace(/[\\/]+/g, '-').replace(/\.\./g, '').trim();
+export function sanitizeInlineRoleLabel(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = name.replace(/[\r\n\u0000-\u001f`]+/g, ' ').replace(/\s+/g, ' ').trim();
   return cleaned || 'Project';
 }
 
+export function sanitizeLedgerSegment(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = name
+    .replace(/[\r\n\u0000-\u001f`]+/g, ' ')
+    .replace(/[\\/]+/g, '-')
+    .replace(/\.\./g, '')
+    .replace(/^\.+|\.+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\.+|\.+$/g, '');
+  return cleaned || 'Project';
+}
+
+/** Canonical vault-relative path for a Portfolio or Project Tier 2 campaign ledger. */
+export function resolveOrchestratorLedgerPath(projectName?: string | null): string {
+  if (!projectName) return 'Products/Portfolio/orchestrator-ledger.md';
+  return `Products/${sanitizeLedgerSegment(projectName)}/orchestrator-ledger.md`;
+}
+
 /**
- * Invariant ~400-token Orchestrator Charter pinned into `appendSystemPrompt`
+ * Invariant ~420-token Orchestrator Charter pinned into `appendSystemPrompt`
  * across all harnesses whenever a thread holds an orchestrator role. Survives
  * context compaction and subordinates any worker coding instructions in Project
  * descriptions.
  */
 export function buildOrchestratorCharter(role: OrchestratorRole): string {
+  const safeProjectName = role.kind === 'project' ? sanitizeInlineRoleLabel(role.projectName) : undefined;
   const roleLabel =
     role.kind === 'project'
-      ? `Project Orchestrator for ${role.projectName}`
+      ? `Project Orchestrator for ${safeProjectName}`
       : 'Portfolio Orchestrator';
-  const ledgerPath =
-    role.kind === 'project'
-      ? `Products/${sanitizeLedgerSegment(role.projectName)}/orchestrator-ledger.md`
-      : 'Products/Portfolio/orchestrator-ledger.md';
+  const ledgerPath = resolveOrchestratorLedgerPath(role.kind === 'project' ? role.projectName : null);
 
   return [
     `## Orchestrator Charter (${roleLabel} — Invariant)`,
@@ -81,8 +101,8 @@ export function buildOrchestratorCharter(role: OrchestratorRole): string {
     '### Two-Tier Memory & 30+ Thread Scale',
     '- **Event pings (`O(1)`):** Call `threads_get` for only the named changed thread(s) instead of scanning all threads.',
     '- **Heartbeats (`O(N)` slim triage):** Call `threads_list` with `view: "triage"`, skip threads that are `isRunning` or where `triage.needsReview` is `false`, and deep-review at most 6 changed threads per pass.',
-    `- **Cross-thread campaign ledger:** Maintain \`${ledgerPath}\` whenever coordinating 3+ related threads, waves, PR merge sequences, or cross-thread blockers so compaction or session reset loses zero state.`,
-    '- **Naming threads to Rick:** Format thread mentions in your replies to Rick as `[[thread:<id>|Title]]` (use plain text in notes, proposed replies, decision fields, and tool arguments).',
+    `- **Cross-thread campaign ledger:** Read and update \`${ledgerPath}\` via \`threads_get_ledger\` and \`threads_set_ledger\` whenever coordinating 3+ related threads, waves, PR merge sequences, or cross-thread blockers so compaction or session reset loses zero state.`,
+    '- **Naming threads to Rick:** Format thread mentions in your replies to Rick as `[[thread:<id>|Title]]` (use plain text in notes, ledgers, proposed replies, decision fields, and tool arguments).',
   ].join('\n');
 }
 
@@ -103,13 +123,23 @@ export function buildOrchestratorGoalContext(goal: string): string {
 
 function cleanField(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
-  const trimmed = raw.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
+  const trimmed = raw.replace(/\s+/g, ' ').trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > MAX_TRIAGE_FIELD_CHARS
+    ? `${trimmed.slice(0, MAX_TRIAGE_FIELD_CHARS - 1).trimEnd()}…`
+    : trimmed;
+}
+
+function normalizeDisposition(raw: string | undefined): string | undefined {
+  const cleaned = cleanField(raw);
+  if (!cleaned) return undefined;
+  const stripped = cleaned.replace(/^`+|`+$/g, '').trim().toLowerCase();
+  return stripped || undefined;
 }
 
 function parseTimestampCursor(raw: string | undefined): number | undefined {
   if (!raw) return undefined;
-  const trimmed = raw.trim();
+  const trimmed = raw.replace(/^`+|`+$/g, '').trim();
   if (!trimmed || trimmed.toLowerCase() === 'none') return undefined;
   if (!/^\d+$/.test(trimmed)) return undefined;
   const parsed = Number(trimmed);
@@ -138,7 +168,8 @@ export function parseManagerNotesTriage(
     if (!fields.has(key)) fields.set(key, val);
   }
 
-  const isV2 = fields.get('orchestrator state')?.toLowerCase() === 'v2';
+  const stateToken = fields.get('orchestrator state')?.replace(/^`+|`+$/g, '').trim().toLowerCase();
+  const isV2 = stateToken === 'v2';
   if (!isV2) {
     const legacyGoal = cleanField(fields.get('orchestrator-tracked goal'));
     const legacyStatus = cleanField(fields.get('status'));
@@ -154,17 +185,17 @@ export function parseManagerNotesTriage(
 
   const outcome = cleanField(fields.get('thread outcome'));
   const strategy = cleanField(fields.get('strategy'));
-  const disposition = cleanField(fields.get('disposition'));
+  const disposition = normalizeDisposition(fields.get('disposition'));
   const status = cleanField(fields.get('status'));
   const lastReviewedUpdate = parseTimestampCursor(fields.get('last reviewed update'));
   const stagedForUpdate = parseTimestampCursor(fields.get('staged for update'));
   const staged = cleanField(fields.get('staged'));
 
   const cursorChanged = lastReviewedUpdate !== updatedAt;
-  const answered = staged ? /^answered\b/i.test(staged) : false;
+  const answered = staged ? /^`?answered\b/i.test(staged) : false;
   const unstagedWaiting =
     disposition === 'needs-decision' &&
-    stagedForUpdate === undefined &&
+    stagedForUpdate !== updatedAt &&
     !answered;
 
   return {
