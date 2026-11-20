@@ -2069,4 +2069,186 @@ describe('AntigravitySession mid-wakeup deadline isolation and agy 1.5.11+ out-o
     expect(h.messages[h.messages.length - 1]).toBe('Hello from Antigravity.');
     expect(h.messages).toHaveLength(4);
   });
+
+  it('waits for multi-chunk out-of-turn agent_message_chunk frames across separate reads and ignores trailing whitespace chunks', async () => {
+    const h = makeHarness({
+      env: { FAKE_ACP_SERVER_VERSION: '1.5.11' },
+      brainOptions: { pollIntervalMs: 15, wakeupGraceMs: 80, outOfTurnTextDrainMs: 250 },
+    });
+    await h.session.start(h.options);
+
+    h.session.send('SUBAGENT_BRAIN multi-chunk-oot');
+    await vi.waitFor(() => expect(h.tasksStarted).toContainEqual(expect.objectContaining({ taskId: 'child-sub-1' })), { timeout: 10_000 });
+    const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+
+    // Direction B + A: chunk 1 arrives, then PLANNER_RESPONSE(DONE) lands on disk, then chunk 2 arrives 35ms later, followed by a trailing "\n".
+    h.appendBrain('child-sub-1', [
+      { step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Audit complete.' },
+    ]);
+    h.appendBrain(sessionId, [
+      { step_index: 4, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=child-sub-1\nAudit complete.' },
+    ]);
+    h.session.handleSessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '  Hello ' } },
+    });
+    h.appendBrain(sessionId, [
+      { step_index: 5, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Hello multi-chunk world.' },
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    // Must still be waiting for chunk 2 — NOT truncated at "Hello "!
+    expect(h.done).not.toHaveBeenCalled();
+    expect(h.session.turnInFlight).toBe(true);
+
+    h.session.handleSessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'multi-chunk world.' } },
+    });
+
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    expect(h.messages[h.messages.length - 1].trim()).toBe('Hello multi-chunk world.');
+
+    // Trailing whitespace chunk after completion must NOT open a zombie wakeup turn!
+    h.session.handleSessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '\n' } },
+    });
+    expect(h.session.turnInFlight).toBe(false);
+  });
+
+  it('keeps consecutive out-of-turn wakeups segmented while sibling subagents remain active, and refreshes grace after child send_message wrap-up', async () => {
+    const h = makeHarness({
+      env: { FAKE_ACP_SERVER_VERSION: '1.5.11' },
+      brainOptions: { pollIntervalMs: 15, wakeupGraceMs: 60, outOfTurnTextDrainMs: 200 },
+    });
+    await h.session.start(h.options);
+
+    h.session.send('SUBAGENT_BRAIN consecutive-oot');
+    await vi.waitFor(() => expect(h.tasksStarted).toContainEqual(expect.objectContaining({ taskId: 'child-sub-1' })), { timeout: 10_000 });
+    const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+    const subHeader = 'Created the ' + 'following subagent:';
+
+    // Wakeup 1 spawns `child-sub-2` and finishes its own DONE step while `child-sub-2` is still running; its final text arrives 25ms after DONE.
+    h.appendBrain('child-sub-1', [
+      { step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Sub 1 done.' },
+    ]);
+    h.appendBrain(sessionId, [
+      { step_index: 4, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=child-sub-1\nSub 1 done.' },
+      {
+        step_index: 5,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [{ name: 'invoke_subagent', args: { Role: 'Second Worker', TypeName: 'research' } }],
+      },
+      { step_index: 6, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: `${subHeader}\n{\n  "conversationId": "child-sub-2"\n}` },
+      { step_index: 7, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Wakeup 1 summary.' },
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    h.session.handleSessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Wakeup 1 summary.' } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(h.done).not.toHaveBeenCalled();
+
+    // `child-sub-2` sends a message, then spends > wakeupGraceMs (90ms > 60ms) finishing its own DONE step before parent receives `<SYSTEM_MESSAGE>`.
+    h.appendBrain('child-sub-2', [
+      {
+        step_index: 0,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [{ name: 'send_message', args: { Recipient: sessionId, Message: 'Sub 2 report' } }],
+      },
+      { step_index: 1, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'Sent' },
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    h.appendBrain('child-sub-2', [
+      { step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Wrapped up.' },
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    // Must still be holding the turn open during refreshed `wakeupGraceMs` after `child-sub-2` hit DONE!
+    expect(h.done).not.toHaveBeenCalled();
+
+    // Wakeup 2 starts with thought + write_file (without `kind: 'edit'`) + final message.
+    h.session.handleSessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'Reviewing second worker output.' } },
+    });
+    h.session.handleSessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'tool_call', toolCallId: 'wf-oot-2', name: 'write_file', args: { Path: '/repo/OUT.md', Content: 'ok' }, status: 'in_progress' },
+    });
+    h.session.handleSessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'tool_call_update', toolCallId: 'wf-oot-2', name: 'write_file', args: { Path: '/repo/OUT.md', Content: 'ok' }, status: 'completed' },
+    });
+    h.session.handleSessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Wakeup 2 summary.' } },
+    });
+    h.appendBrain(sessionId, [
+      { step_index: 8, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=child-sub-2\nSub 2 report' },
+      { step_index: 9, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: '', tool_calls: [{ name: 'write_file', args: { Path: '/repo/OUT.md' } }] },
+      { step_index: 10, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'Wrote' },
+      { step_index: 11, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Wakeup 2 summary.' },
+    ]);
+
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    // Wakeup 1 and Wakeup 2 messages must be distinct (never concatenated!), thoughts captured, and edited path emitted!
+    expect(h.messages.map((m) => m.trim()).filter(Boolean)).toEqual([
+      'Waiting on Auth Researcher.',
+      'Wakeup 1 summary.',
+      'Wakeup 2 summary.',
+    ]);
+    expect(h.thoughts).toContain('Reviewing second worker output.');
+    expect(h.filesEdited).toContainEqual(['/repo/OUT.md']);
+  });
+
+  it('settles unfinished announced tools on post-ACP interrupt, snapshots baseline on session/load, and reports queuedTurnCount on onDone', async () => {
+    // Pre-populate historical brain steps for `saved-oot-1` BEFORE session/load so a spontaneous wakeup before Turn 1 never replays history.
+    const brainRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-brain-resume-'));
+    cleanup.push(() => fs.rmSync(brainRoot, { recursive: true, force: true }));
+    const histDir = path.join(brainRoot, 'saved-oot-1', '.system_generated', 'logs');
+    fs.mkdirSync(histDir, { recursive: true });
+    fs.writeFileSync(path.join(histDir, 'transcript_full.jsonl'), [
+      JSON.stringify({ step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Old historical reply.' }),
+    ].join('\n') + '\n');
+
+    const h = makeHarness({
+      resume: 'saved-oot-1',
+      env: { FAKE_ACP_KNOWN_SESSIONS: 'saved-oot-1', FAKE_ACP_SERVER_VERSION: '1.5.11' },
+      brainOptions: { brainDir: brainRoot, pollIntervalMs: 15, outOfTurnNoBrainIdleMs: 50, wakeupGraceMs: 80 },
+    });
+    await h.session.start(h.options);
+
+    // Spontaneous out-of-turn tool starts before any user `send()`, then user interrupts mid-tool!
+    h.session.handleSessionUpdate({
+      sessionId: 'saved-oot-1',
+      update: { sessionUpdate: 'tool_call', toolCallId: 'hang-oot-1', name: 'run_command', kind: 'execute', status: 'in_progress' },
+    });
+    expect(h.session.turnInFlight).toBe(true);
+    expect(h.messages).not.toContain('Old historical reply.');
+
+    await h.session.interrupt();
+    expect(h.events).toContain('interrupted');
+    expect(h.toolResults).toContainEqual(['hang-oot-1', 'error']);
+
+    // Subsequent spontaneous wakeup + queued user send reports `queuedTurnCount` and `userMessageUuid` cleanly without poisoning!
+    fs.unlinkSync(path.join(histDir, 'transcript_full.jsonl'));
+    h.session.handleSessionUpdate({
+      sessionId: 'saved-oot-1',
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Fresh spontaneous note.' } },
+    });
+    expect(h.session.turnInFlight).toBe(true);
+    h.session.send('TEXT queued user turn', undefined, 'user-uuid-42');
+
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(2), { timeout: 10_000 });
+    expect(h.done.mock.calls[0][3]).toEqual({ queuedTurnCount: 1 });
+    expect(h.done.mock.calls[1][3]).toEqual({ userMessageUuid: 'user-uuid-42' });
+    expect(h.messages).toEqual(['Fresh spontaneous note.', 'Hello from Antigravity.']);
+  });
 });
