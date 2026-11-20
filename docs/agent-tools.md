@@ -65,7 +65,8 @@ Discover, read, and message other running threads. Project threads coordinate on
 | Tool | Parameters | Description |
 |---|---|---|
 | `threads_get_current` | — | Returns this thread's metadata, live status, project, cwd, PR, schedule origin, raw-log path, and message count. |
-| `threads_list` | `projectId?` | Returns authorized thread metadata. Portfolio passes a Project id for one-call elevation. |
+| `threads_get` | `threadId`, `recentMessages?`, `elevatedProjectId?` | Returns one thread's full snapshot in `O(1)` — including `goal`, `managerNotes`, `proposedReply`, `pendingDecisions`, parsed v2 `triage` metadata, and optionally the last `N` messages (`recentMessages`, up to 50). Canonical-only read tool. |
+| `threads_list` | `projectId?`, `view?` (`"full"` \| `"triage"`) | Returns authorized thread metadata. Pass `view: "triage"` during orchestrator heartbeats to receive compact parsed v2 triage summaries (`outcome`, `strategy`, `disposition`, `needsReview`, pending counts) without multi-line note or proposal bodies. Portfolio passes a Project id for one-call elevation. |
 | `threads_list_projects` | — | Returns configured projects with `cwdOverride` and resolved `effectiveCwd`. |
 | `threads_create_project` | `name`, `vaultFolder`, `description?`, `cwdOverride?` | Creates and persists a project. |
 | `threads_update_project` | `projectId`, `name?`, `description?`, `cwdOverride?`, `elevatedProjectId?` | Updates the caller's Project name, context, or cwd override and waits for persistence. Pass `null` for description or cwd override to clear it. Existing threads retain their cwd and live session; future Project threads and dynamic schedules use the updated cwd. Portfolio callers must explicitly elevate to the matching Project. |

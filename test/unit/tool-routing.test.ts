@@ -121,7 +121,7 @@ describe('toolRouting routes', () => {
       'browser_screenshot', 'browser_scroll', 'browser_snapshot', 'browser_status', 'browser_type',
       'list_watched_documents',
       'skills_get', 'skills_list_installed', 'skills_list_sources', 'skills_search',
-      'threads_get_current', 'threads_get_log', 'threads_get_messages', 'threads_list', 'threads_list_projects', 'threads_wait',
+      'threads_get', 'threads_get_current', 'threads_get_log', 'threads_get_messages', 'threads_list', 'threads_list_projects', 'threads_wait',
       'vault_get_backlinks', 'vault_get_file_history', 'vault_get_note_metadata', 'vault_get_outgoing_links', 'vault_list', 'vault_list_bridges', 'vault_search',
       'sync_inspect_conflict', 'sync_list_conflicts',
       'workspace_get_active_file', 'workspace_get_open_tabs',

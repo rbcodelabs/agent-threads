@@ -931,6 +931,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
               lastError: t.lastError,
               reviewed: t.reviewed,
               projectId: t.projectId,
+              ...(t.goal ? { goal: t.goal } : {}),
               cwd: t.cwd,
               originRepoPath: t.originRepoPath,
               projectNameOverride: t.projectNameOverride,
@@ -2082,6 +2083,27 @@ export default class ClaudeThreadsPlugin extends Plugin {
       name: 'Open Portfolio Orchestrator',
       callback: async () => {
         await this.ensureOrchestratorThread();
+      },
+    });
+
+    this.addCommand({
+      id: 'reset-orchestrator-session',
+      name: 'Reset orchestrator session (fresh context)',
+      callback: async () => {
+        const activeId = this.getView()?.getActiveThreadId?.();
+        const isOrch = (id: string | null | undefined): id is string =>
+          !!id && (id === this.settings.orchestratorThreadId || this.manager.getProjects().some(p => p.orchestratorThreadId === id));
+        const targetId = isOrch(activeId)
+          ? activeId
+          : isOrch(this.settings.orchestratorThreadId)
+            ? this.settings.orchestratorThreadId
+            : undefined;
+        if (!targetId || !this.manager.resetThreadSession(targetId)) {
+          new Notice('No active orchestrator thread found to reset.');
+          return;
+        }
+        await this.saveSettings();
+        new Notice('Orchestrator session reset — next turn starts with a fresh context window.');
       },
     });
 

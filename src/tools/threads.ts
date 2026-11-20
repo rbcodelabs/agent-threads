@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk/browser';
 import path from 'path';
 import { isValidOverviewPath } from '../projectOverview';
+import { parseManagerNotesTriage } from '../orchestratorCharter';
 import type { ObsidianMcpServerOptions, ProjectUpdatePatch } from '../ObsidianTools';
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 
@@ -92,16 +93,76 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     { alwaysLoad: true },
   );
 
+  const boundGetThread = tool(
+    'threads_get',
+    'Returns the full snapshot for a single thread by ID in O(1) — including goal, managerNotes, proposedReply, pendingDecisions, parsed v2 triage metadata, and optionally the most recent N messages (recentMessages). Prefer this over threads_list on targeted event wake-ups.',
+    {
+      threadId: z.string().describe('ID of the thread to inspect'),
+      recentMessages: z.number().int().min(0).max(50).optional().describe('Optional count of most recent non-compact messages to include (0 or omitted omits messages)'),
+      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+    },
+    async (args, _extra) => {
+      try {
+        if (!options.getThreadDetail) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Thread state not available in this context.' }) }], isError: true };
+        }
+        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'read')) {
+          throw new Error('Target is outside coordination scope.');
+        }
+        const detail = options.getThreadDetail(args.threadId);
+        if (!detail) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: `Thread not found: ${args.threadId}` }) }], isError: true };
+        }
+        const { messages, ...meta } = detail;
+        const recent = args.recentMessages && args.recentMessages > 0 ? messages.slice(-args.recentMessages) : undefined;
+        const payload = {
+          ...meta,
+          triage: parseManagerNotesTriage(meta.managerNotes, meta.updatedAt),
+          ...(recent !== undefined ? { messages: recent } : {}),
+        };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }] };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true };
+      }
+    },
+    { alwaysLoad: true },
+  );
+
   const boundListThreads = tool(
     'obsidian_list_threads',
-    'Returns all threads with their id, title, status, uiStatus, isRunning flag, project, cwd, prUrl, scheduledItemId, scheduledItemName, rawLogPath, updatedAt, and message count. Use this to discover other running threads before coordinating with them. uiStatus matches the Agents List UI labels (working | new | reviewed | failed | ready). prUrl is the URL of the most recent GitHub PR opened in that thread, if any — useful for matching threads to PRs without reading message history. scheduledItemId/scheduledItemName identify the cron item that created a thread, if it was created by one. rawLogPath is the vault-relative path to the thread\'s raw JSONL conversation log (read it with threads_get_log).',
-    { projectId: z.string().optional().describe('Portfolio orchestrator only: explicitly elevate this call into one Project.') },
+    'Returns all threads with their id, title, status, uiStatus, isRunning flag, project, cwd, prUrl, scheduledItemId, scheduledItemName, rawLogPath, updatedAt, and message count. Pass view: "triage" during orchestrator heartbeats to receive compact pre-parsed v2 triage summaries (outcome, strategy, disposition, needsReview, pending counts) without multi-line managerNotes or full proposal bodies. uiStatus matches the Agents List UI labels (working | new | reviewed | failed | ready).',
+    {
+      projectId: z.string().optional().describe('Portfolio orchestrator only: explicitly elevate this call into one Project.'),
+      view: z.enum(['full', 'triage']).optional().describe('Optional projection mode: "full" (default) returns complete ThreadSnapshots; "triage" omits raw managerNotes and proposal bodies in favor of compact parsed triage summaries.'),
+    },
     async (args, _extra) => {
       try {
         if (!options.getAllThreads) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Thread state not available in this context.' }) }], isError: true };
         }
         const threads = options.getAllThreads().filter(thread => options.authorizeThread?.(thread.id, args.projectId, 'read') ?? true);
+        if (args.view === 'triage') {
+          const compact = threads.map(thread => ({
+            id: thread.id,
+            title: thread.title,
+            status: thread.status,
+            uiStatus: thread.uiStatus,
+            isRunning: thread.isRunning,
+            ...(thread.lastError ? { lastError: thread.lastError } : {}),
+            ...(thread.reviewed !== undefined ? { reviewed: thread.reviewed } : {}),
+            ...(thread.projectId ? { projectId: thread.projectId } : {}),
+            ...(thread.prUrl ? { prUrl: thread.prUrl } : {}),
+            updatedAt: thread.updatedAt,
+            messageCount: thread.messageCount,
+            hasProposedReply: !!thread.proposedReply,
+            ...(thread.proposedReply?.sourceThreadId ? { proposedReplySourceThreadId: thread.proposedReply.sourceThreadId } : {}),
+            pendingDecisionCount: thread.pendingDecisions?.length ?? 0,
+            ...(thread.pendingDecisions?.length ? { pendingDecisionIds: thread.pendingDecisions.map(d => d.id) } : {}),
+            triage: parseManagerNotesTriage(thread.managerNotes, thread.updatedAt),
+          }));
+          return { content: [{ type: 'text' as const, text: JSON.stringify(compact, null, 2) }] };
+        }
         return { content: [{ type: 'text' as const, text: JSON.stringify(threads, null, 2) }] };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -675,6 +736,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
   const toolDefs: Array<ToolDef | undefined> = [
     boundCreateThread as ToolDef | undefined,
     boundGetCurrentThread as ToolDef | undefined,
+    boundGetThread as ToolDef | undefined,
     boundListThreads as ToolDef | undefined,
     boundListProjects as ToolDef | undefined,
     boundCreateProject as ToolDef | undefined,
@@ -697,6 +759,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
   const toolNames = [
     'threads_create',
     'obsidian_get_current_thread',
+    'threads_get',
     'obsidian_list_threads',
     'obsidian_list_projects',
     'obsidian_create_project',

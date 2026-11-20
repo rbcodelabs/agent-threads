@@ -1,5 +1,7 @@
 import { agentHarnessLabel, type AgentHarness } from './types';
 import { buildProjectOverviewContext, composeAppendSystemPrompt, readProjectOverview } from './projectOverview';
+import { describeOrchestratorThread } from './orchestratorThreads';
+import { ORCHESTRATOR_ROLE_DISALLOWED_TOOLS, buildOrchestratorCharter, buildOrchestratorGoalContext } from './orchestratorCharter';
 import { extractUrls } from './urlLinks';
 import { PeerSkillRegistry } from './PeerSkills';
 import { mergeDisallowedTools } from './toolRestrictions';
@@ -1941,6 +1943,31 @@ export class ThreadManager {
     this.emit(threadId, { type: 'message', message });
   }
 
+  /**
+   * Resets a thread's underlying harness session so the next turn starts with a
+   * fresh context window (resume = undefined, no fallback history), while keeping
+   * the visible message transcript, thread ID, Project assignment, and /goal intact.
+   */
+  resetThreadSession(threadId: string): boolean {
+    const thread = this.threads.get(threadId);
+    if (!thread) return false;
+    thread.sessionGeneration = (thread.sessionGeneration ?? 0) + 1;
+    delete thread.sessionId;
+    delete thread.pendingHarnessHandoff;
+    delete thread.pendingBackgroundTasks;
+    delete thread.usageSnapshot;
+    const oldSession = this.sessions.get(threadId);
+    if (oldSession) {
+      oldSession.close();
+      this.sessions.delete(threadId);
+    }
+    this.selectedAgentRuns.delete(threadId);
+    if (thread.status === 'active') thread.status = 'waiting';
+    this.addNoticeMessage(threadId, 'completed', 'Session context reset — next turn starts with a fresh context window.');
+    this.emit(threadId, { type: 'run_state_settled' });
+    return true;
+  }
+
   private getGoalContextState(threadId: string): GoalContextState {
     let state = this.goalContextStates.get(threadId);
     if (!state) {
@@ -2542,11 +2569,18 @@ export class ThreadManager {
       this.settings.saveThreadsToVault,
       this.hostName,
     );
+    const orchestratorRole = describeOrchestratorThread(threadId, {
+      portfolioThreadId: this.settings.orchestratorThreadId,
+      projects: this.getProjects(),
+    });
+    const orchestratorCharter = orchestratorRole ? buildOrchestratorCharter(orchestratorRole) : undefined;
     const projectDesc = project?.description?.trim();
     const goalContext = thread.goal
-      ? `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
-        'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
-        'state what remains and continue working on it. The goal stays active until the user clears it with /goal clear.'
+      ? orchestratorRole
+        ? buildOrchestratorGoalContext(thread.goal)
+        : `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
+          'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
+          'state what remains and continue working on it. The goal stays active until the user clears it with /goal clear.'
       : '';
     // INTENTIONAL: thread.managerNotes, thread.proposedReply and
     // thread.pendingDecisions are never included
@@ -2557,7 +2591,13 @@ export class ThreadManager {
     // its own prior "grading" of the thread and the orchestrator's draft before
     // Rick has approved it. Do not "fix" this by adding them to the list.
     const overviewContext = buildProjectOverviewContext(readProjectOverview(project, rel => this.readVaultFileSync(rel)));
-    const appendSystemPrompt = composeAppendSystemPrompt({ envContext, projectDesc, overviewContext, goalContext });
+    const appendSystemPrompt = composeAppendSystemPrompt({
+      envContext,
+      projectDesc,
+      overviewContext,
+      orchestratorCharter,
+      goalContext,
+    });
     const sessionMcpServers = this.mcpServerFactory ? this.mcpServerFactory(threadId, thread.cwd) : this.mcpServers;
     // Baseline for stale detection: options are rebuilt every turn but only used
     // when the session (re)starts, so record once per session object.
@@ -2578,7 +2618,7 @@ export class ThreadManager {
     const agentProfiles = loadAgentProfiles(this.settings.skillSources ?? []);
     // One skill-root list for every harness that discovers by parent directory
     // (Codex via skills/extraRoots/set, OpenCode via its native skills.paths).
-    const skillRoots = codexSkillRoots(
+    const baseSkillRoots = codexSkillRoots(
       this.settings.skillSources ?? [],
       this.pluginResourceDir
         ? require('path').join(this.pluginResourceDir, 'resources', 'skills')
@@ -2588,12 +2628,21 @@ export class ThreadManager {
       pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
       this.localSkillsRoot(),
     );
+    const peerSkillsDirs = this.peerSkills.list().length > 0
+      ? [...new Set(this.peerSkillPlugins().map(p => (require('path') as typeof import('path')).dirname(p.path)))]
+      : [];
+    const skillRoots = [...new Set([...baseSkillRoots, ...peerSkillsDirs])];
+    const roleScopedDisallowed = orchestratorRole
+      ? mergeDisallowedTools(thread.disallowedTools, ORCHESTRATOR_ROLE_DISALLOWED_TOOLS)
+      : thread.disallowedTools?.length
+        ? [...thread.disallowedTools]
+        : undefined;
 
     return {
       cwd: thread.cwd,
       permissionMode: thread.permissionMode ?? this.settings.permissionMode,
-      // Per-thread denylist (restriction-only; see toolRestrictions.ts).
-      ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
+      // Per-thread denylist + non-inherited orchestrator role lockout (see toolRestrictions.ts & orchestratorCharter.ts).
+      ...(roleScopedDisallowed?.length ? { disallowedTools: roleScopedDisallowed } : {}),
       extraEnvRaw: effectiveExtraEnv(this.settings),
       // Session IDs are harness-specific. Existing threads predate the field
       // and are Claude threads, so they never get passed to Codex.
@@ -2627,7 +2676,11 @@ export class ThreadManager {
       secretEnv: resolvedSecretEnv,
       claude: {
         mcpServers: sessionMcpServers,
-        disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
+        disallowedTools: mergeDisallowedTools(
+          this.settings.disallowedTools,
+          thread.disallowedTools,
+          orchestratorRole ? ORCHESTRATOR_ROLE_DISALLOWED_TOOLS : undefined,
+        ),
         sessionOptions: this.buildSessionOptions(thread, agentProfiles),
       },
       codex: {
@@ -2674,10 +2727,17 @@ export class ThreadManager {
     const mounts = this.remoteDaemons?.mountsOf?.(remote.daemonId);
     const hostToolsEnabled = !!this.remoteHostToolsFactory && this.remoteDaemons?.hostToolsOf?.(remote.daemonId)?.enabled === true;
     const harness: AgentHarness = thread.agentHarness ?? 'claude';
+    const orchestratorRole = describeOrchestratorThread(threadId, {
+      portfolioThreadId: this.settings.orchestratorThreadId,
+      projects: this.getProjects(),
+    });
+    const orchestratorCharter = orchestratorRole ? buildOrchestratorCharter(orchestratorRole) : undefined;
     const goalContext = thread.goal
-      ? `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
-        'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
-        'state what remains and continue working on it. The goal stays active until the user clears it with /goal clear.'
+      ? orchestratorRole
+        ? buildOrchestratorGoalContext(thread.goal)
+        : `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
+          'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
+          'state what remains and continue working on it. The goal stays active until the user clears it with /goal clear.'
       : '';
     const appendSystemPrompt = [
       buildRemoteEnvironmentPrompt(
@@ -2690,6 +2750,7 @@ export class ThreadManager {
         { hostTools: hostToolsEnabled, ...(mounts?.length ? { mounts } : {}) },
       ),
       project?.description?.trim(),
+      orchestratorCharter,
       goalContext,
     ].filter(Boolean).join('\n\n');
     const agentProfiles = loadAgentProfiles(this.settings.skillSources ?? []);
@@ -2714,13 +2775,22 @@ export class ThreadManager {
         : undefined,
     };
     const passthrough = Object.keys(partition.passthrough).length ? partition.passthrough : undefined;
+    const remoteRoleDisallowed = orchestratorRole
+      ? mergeDisallowedTools(thread.disallowedTools, ORCHESTRATOR_ROLE_DISALLOWED_TOOLS)
+      : thread.disallowedTools?.length
+        ? [...thread.disallowedTools]
+        : undefined;
     if (harness === 'claude') {
       return {
         ...common,
-        ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
+        ...(remoteRoleDisallowed?.length ? { disallowedTools: remoteRoleDisallowed } : {}),
         model: modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
         claude: {
-          disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
+          disallowedTools: mergeDisallowedTools(
+            this.settings.disallowedTools,
+            thread.disallowedTools,
+            orchestratorRole ? ORCHESTRATOR_ROLE_DISALLOWED_TOOLS : undefined,
+          ),
           sessionOptions: this.buildSessionOptions(thread, agentProfiles),
           ...(passthrough ? { remoteMcpServers: passthrough } : {}),
           ...(extras?.envKind ? { remoteEnvKind: extras.envKind } : {}),
@@ -2732,7 +2802,11 @@ export class ThreadManager {
     // denylist is the top-level one (Claude's tool names are ignored by the daemon's adapters except Bash/edits), and
     // the vetted MCP servers go in the harness's own block, which `projectSessionOptions` reads back. An explicit
     // three-way choice: a new harness must be added here, not silently become OpenCode.
-    const disallowed = mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools);
+    const disallowed = mergeDisallowedTools(
+      this.settings.disallowedTools,
+      thread.disallowedTools,
+      orchestratorRole ? ORCHESTRATOR_ROLE_DISALLOWED_TOOLS : undefined,
+    );
     const mcpBlock = passthrough ? { mcpServers: passthrough } : {};
     return {
       ...common,
