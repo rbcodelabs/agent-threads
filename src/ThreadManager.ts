@@ -1,4 +1,9 @@
 import { agentHarnessLabel, type AgentHarness } from './types';
+import {
+  resolveDefaultPermissionMode,
+  resolveEffectivePermissionMode,
+  resolveHarnessDefaultModel,
+} from './harnessSettings';
 import { buildProjectOverviewContext, composeAppendSystemPrompt, readProjectOverview } from './projectOverview';
 import { extractUrls } from './urlLinks';
 import { PeerSkillRegistry } from './PeerSkills';
@@ -1449,7 +1454,7 @@ export class ThreadManager {
       // control-request on the live Query, no restart needed.
       const session = this.sessions.get(id);
       if (session) {
-        const effectiveMode = mode ?? this.settings.permissionMode;
+        const effectiveMode = mode ?? resolveDefaultPermissionMode(this.settings, thread.agentHarness);
         session.setPermissionMode(effectiveMode).catch((err) => {
           console.error('[ClaudeThreads] setThreadPermissionMode: live setPermissionMode() failed:', err);
         });
@@ -2276,7 +2281,7 @@ export class ThreadManager {
     // Claude escalation takes precedence. Codex rejects the Claude-only
     // keyword before creating a transcript entry or native session.
     const model = resolvedPrompt.model ?? thread.model
-      ?? ((thread.agentHarness ?? 'claude') !== 'claude' ? undefined : (this.settings.defaultModel || undefined));
+      ?? resolveHarnessDefaultModel(this.settings, thread.agentHarness);
     const promptText = resolvedPrompt.promptText;
     const claimedHandoff = this.claimHarnessHandoff(threadId);
 
@@ -2589,9 +2594,11 @@ export class ThreadManager {
       this.localSkillsRoot(),
     );
 
+    const effectivePermissionMode = resolveEffectivePermissionMode(this.settings, thread);
+
     return {
       cwd: thread.cwd,
-      permissionMode: thread.permissionMode ?? this.settings.permissionMode,
+      permissionMode: effectivePermissionMode,
       // Per-thread denylist (restriction-only; see toolRestrictions.ts).
       ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
       extraEnvRaw: effectiveExtraEnv(this.settings),
@@ -2601,7 +2608,7 @@ export class ThreadManager {
       callbacks: this.buildSessionCallbacks(threadId, thread),
       additionalDirectories: additionalDirs,
       // modelOverride carries sendMessage()'s escalation-aware `model` local
-      // (keywordModel ?? thread.model ?? settings.defaultModel) through to a
+      // (keywordModel ?? thread.model ?? harnessDefaultModel) through to a
       // brand-new session's start(). Without it, a thread's first-ever
       // message silently dropped the /escalate keyword: this method used to
       // independently recompute `thread.model ?? settings.defaultModel`,
@@ -2613,10 +2620,7 @@ export class ThreadManager {
       // and fall back to the plain thread.model — correct there, since a
       // cwd-change restart isn't a new user message and has no escalation
       // keyword to apply.
-      // settings.defaultModel holds Claude aliases; other harnesses use their own default.
-      model: (thread.agentHarness ?? 'claude') !== 'claude'
-        ? (modelOverride ?? thread.model ?? undefined)
-        : modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
+      model: modelOverride ?? thread.model ?? resolveHarnessDefaultModel(this.settings, thread.agentHarness),
       appendSystemPrompt,
       resumeFallbackHistory: thread.sessionId
         ? buildHistoryPreamble(
@@ -2634,7 +2638,7 @@ export class ThreadManager {
         computerUseEnabled: this.settings.codexComputerUseEnabled === true,
         networkAccessEnabled: thread.codexNetworkAccessEnabled ?? this.settings.codexNetworkAccessDefault === true,
         localSkillsRoot: this.localSkillsRoot(),
-        ...resolveCodexPermissions(thread.permissionMode ?? this.settings.permissionMode),
+        ...resolveCodexPermissions(effectivePermissionMode),
         ...(this.settings.codexEffort && this.settings.codexEffort !== 'default'
           ? { effort: this.settings.codexEffort }
           : {}),
@@ -2699,9 +2703,10 @@ export class ThreadManager {
     const partition = partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist, this.remoteDaemons?.mcpSyncOf?.(remote.daemonId));
     const resume = thread.sessionId;
     const extras = this.remoteSessionExtras?.(threadId);
+    const effectivePermissionMode = resolveEffectivePermissionMode(this.settings, thread);
     const common = {
       cwd: remote.remoteCwd,
-      permissionMode: thread.permissionMode ?? this.settings.permissionMode,
+      permissionMode: effectivePermissionMode,
       extraEnvRaw: '',
       resume,
       callbacks: this.buildSessionCallbacks(threadId, thread),
@@ -2718,7 +2723,7 @@ export class ThreadManager {
       return {
         ...common,
         ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
-        model: modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
+        model: modelOverride ?? thread.model ?? resolveHarnessDefaultModel(this.settings, 'claude'),
         claude: {
           disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
           sessionOptions: this.buildSessionOptions(thread, agentProfiles),
@@ -2728,7 +2733,7 @@ export class ThreadManager {
         },
       };
     }
-    // Codex, OpenCode and Antigravity: Claude's model aliases mean nothing to them (as for a local thread), the
+    // Codex, OpenCode and Antigravity: resolve each harness's own default model, the
     // denylist is the top-level one (Claude's tool names are ignored by the daemon's adapters except Bash/edits), and
     // the vetted MCP servers go in the harness's own block, which `projectSessionOptions` reads back. An explicit
     // three-way choice: a new harness must be added here, not silently become OpenCode.
@@ -2737,12 +2742,12 @@ export class ThreadManager {
     return {
       ...common,
       ...(disallowed.length ? { disallowedTools: disallowed } : {}),
-      model: modelOverride ?? thread.model ?? undefined,
+      model: modelOverride ?? thread.model ?? resolveHarnessDefaultModel(this.settings, harness),
       ...(harness === 'codex'
         ? {
             codex: {
               networkAccessEnabled: thread.codexNetworkAccessEnabled === true,
-              ...resolveCodexPermissions(thread.permissionMode ?? this.settings.permissionMode),
+              ...resolveCodexPermissions(effectivePermissionMode),
               ...(this.settings.codexEffort && this.settings.codexEffort !== 'default' ? { effort: this.settings.codexEffort } : {}),
               ...mcpBlock,
             },

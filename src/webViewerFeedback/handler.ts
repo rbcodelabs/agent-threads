@@ -35,6 +35,7 @@ export interface HandlerThreadRecord {
   readonly remote?: unknown;
   readonly background?: boolean;
   readonly status?: string;
+  readonly agentHarness?: string;
   readonly permissionMode?: string;
   readonly createdAt: number;
   readonly updatedAt?: number;
@@ -57,6 +58,7 @@ export interface WebViewerFeedbackHost {
     readonly activeThreadId?: string;
     readonly escalationKeyword?: string;
     readonly permissionMode?: string;
+    readonly permissionModeByHarness?: Readonly<Record<string, string | undefined>>;
     readonly projects?: readonly HandlerProjectRecord[];
   };
   readonly manager: Omit<CoordinatorThreadManager, 'getThread'> & {
@@ -223,7 +225,10 @@ export function createWebViewerFeedbackHandler(
         .map((t) => {
           const title = cleanSingleLine(t.title, MAX_THREAD_TITLE_UNITS) || 'Untitled thread';
           const subtitle = resolveThreadSubtitle(t, host);
-          const effectivePermissionMode = t.permissionMode ?? host.settings.permissionMode;
+          const effectivePermissionMode =
+            t.permissionMode
+            ?? host.settings.permissionModeByHarness?.[t.agentHarness ?? 'claude']
+            ?? host.settings.permissionMode;
           const planMode =
             effectivePermissionMode === 'plan' ||
             Boolean(host.manager.hasPendingPlan?.(t.id));

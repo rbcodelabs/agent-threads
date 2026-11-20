@@ -44,6 +44,7 @@
     "src/decisions.ts",
     "src/gateRunner.ts",
     "src/gitClient.ts",
+    "src/harnessSettings.ts",
     "src/host/AttachmentStore.ts",
     "src/imageExternalization.ts",
     "src/legacySandboxVm.ts",

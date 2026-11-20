@@ -11711,3 +11711,163 @@ button.ct-agent-crumb:focus-visible {
   .ct-gallery-nav { transition: none; }
 }
 /* ══ end Gallery mode ═══════════════════════════════════════════════════════ */
+
+/* ══ Settings → Agent: Shared defaults + per-provider tabs ══════════════════ */
+.ct-agent-shared-defaults {
+  margin-bottom: 20px;
+}
+
+.ct-agent-providers-section {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 8px);
+  background: var(--background-primary);
+  margin: 16px 0 20px;
+  overflow: hidden;
+}
+
+.ct-agent-providers-header {
+  padding: 14px 16px 10px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ct-agent-providers-title {
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+  color: var(--text-normal);
+  margin-bottom: 2px;
+}
+
+.ct-agent-providers-desc {
+  margin: 0;
+}
+
+.ct-provider-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 14px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ct-provider-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 5px 11px;
+  border-radius: var(--radius-s, 6px);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-weight: 500;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.ct-provider-tab:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.ct-provider-tab.is-active {
+  background: var(--interactive-accent);
+  border-color: transparent;
+  color: var(--text-on-accent);
+}
+
+.ct-provider-tab:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.ct-provider-tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ct-provider-tab-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.ct-provider-tab-label {
+  white-space: nowrap;
+}
+
+.ct-provider-tab-badge {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.3;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.ct-provider-tab.is-active .ct-provider-tab-badge {
+  background: rgba(255, 255, 255, 0.22);
+  color: var(--text-on-accent);
+}
+
+.ct-provider-panel {
+  padding: 4px 16px 12px;
+  min-width: 0;
+}
+
+.ct-provider-panel > .setting-item:first-child {
+  border-top: none;
+}
+
+.ct-provider-panel .setting-item-control {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ct-provider-panel .setting-item-control select {
+  max-width: 100%;
+}
+
+.ct-model-refresh-status {
+  margin-top: 6px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.ct-model-refresh-status.mod-warning {
+  color: var(--text-error);
+}
+
+@container ct-settings (max-width: 520px) {
+  .ct-agent-providers-header {
+    padding: 12px;
+  }
+  .ct-provider-tabs {
+    padding: 8px 10px;
+  }
+  .ct-provider-tab {
+    flex: 1 1 calc(50% - 6px);
+    justify-content: center;
+    min-height: 38px;
+  }
+  .ct-provider-panel {
+    padding: 4px 12px 10px;
+  }
+}
+
+@media (max-width: 520px) {
+  .ct-provider-panel .setting-item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .ct-provider-panel .setting-item-control {
+    justify-content: flex-start;
+  }
+}
+/* ══ end Settings → Agent ═══════════════════════════════════════════════════ */
