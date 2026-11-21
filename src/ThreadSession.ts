@@ -43,6 +43,7 @@ import { isReportedModelId } from './modelOptions';
 import { parseInitMcpServers } from './mcpStatus';
 import { mergeUsageSnapshot,normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
 import { resolvePlanText, isPlanFilePath } from './planText';
+import { createClaudeProcessGroupSpawner } from './processTree';
 
 /**
  * Everything needed to open a thread's long-lived `Query`, once, for the
@@ -344,6 +345,9 @@ export class ThreadSession {
       includePartialMessages: true,
       canUseTool,
       stderr: (data: string) => { this.stderrTail = appendStderrTail(this.stderrTail, data); },
+      spawnClaudeCodeProcess: createClaudeProcessGroupSpawner((data: string) => {
+        this.stderrTail = appendStderrTail(this.stderrTail, data);
+      }),
       // Keep task-tracking tools (TaskCreate/TaskUpdate/TaskList/TodoWrite) in the
       // default tool surface — SDK 0.3.233 drops them on Opus 4.8 / Sonnet 5 / Fable 5
       // and newer models unless opted back in. The plugin's dashboard depends on them.

@@ -609,3 +609,209 @@ describe('ThreadManager — hasActiveBackgroundTasks / getActiveBackgroundTasks'
     expect(manager.getActiveBackgroundTasks(t.id)).toEqual([]);
   });
 });
+
+describe('ThreadManager — idle session reaper & live session LRU cap', () => {
+  function makeFakeSession(overrides: Partial<{
+    turnInFlight: boolean;
+    hasPendingPermission: boolean;
+    canIdleReap: () => boolean;
+    close: ReturnType<typeof vi.fn>;
+  }> = {}) {
+    const close = overrides.close ?? vi.fn();
+    return {
+      turnInFlight: overrides.turnInFlight ?? false,
+      cwd: '/tmp',
+      hasPendingPermission: overrides.hasPendingPermission ?? false,
+      canIdleReap: overrides.canIdleReap ?? (() => true),
+      start: vi.fn().mockResolvedValue(undefined),
+      send: vi.fn(),
+      interrupt: vi.fn().mockResolvedValue(undefined),
+      close,
+      setModel: vi.fn().mockResolvedValue(undefined),
+      setPermissionMode: vi.fn().mockResolvedValue(undefined),
+      getContextUsage: vi.fn().mockResolvedValue(null),
+      getUsageSnapshot: vi.fn().mockResolvedValue(null),
+    };
+  }
+
+  function injectSession(
+    manager: ThreadManager,
+    threadId: string,
+    session: ReturnType<typeof makeFakeSession>,
+    lastActiveAt: number,
+  ) {
+    const m = manager as any;
+    m.sessions.set(threadId, session);
+    m.sessionLastActiveAt.set(threadId, lastActiveAt);
+  }
+
+  it('reaps idle local sessions past idleReapMinutes while preserving thread.sessionId', () => {
+    const manager = makeManager({ idleReapMinutes: 15, maxLiveSessions: 0 });
+    const t = manager.createThread('Idle thread', '/tmp');
+    t.sessionId = 'sess-keep-me';
+    const session = makeFakeSession();
+    const base = 1_000_000;
+    injectSession(manager, t.id, session, base);
+
+    // 14m59s — not yet eligible
+    expect(manager.reapIdleSessions(base + 15 * 60_000 - 1000)).toBe(0);
+    expect(session.close).not.toHaveBeenCalled();
+
+    // 15m00s — reaped
+    expect(manager.reapIdleSessions(base + 15 * 60_000)).toBe(1);
+    expect(session.close).toHaveBeenCalledTimes(1);
+    expect((manager as any).sessions.has(t.id)).toBe(false);
+    expect((manager as any).sessionLastActiveAt.has(t.id)).toBe(false);
+    expect(t.sessionId).toBe('sess-keep-me');
+  });
+
+  it('does not reap when idleReapMinutes is 0', () => {
+    const manager = makeManager({ idleReapMinutes: 0, maxLiveSessions: 0 });
+    const t = manager.createThread('Disabled timeout', '/tmp');
+    const session = makeFakeSession();
+    injectSession(manager, t.id, session, 0);
+
+    expect(manager.reapIdleSessions(100 * 60_000)).toBe(0);
+    expect(session.close).not.toHaveBeenCalled();
+    expect((manager as any).sessions.has(t.id)).toBe(true);
+  });
+
+  it('skips sessions protected by turnInFlight, canIdleReap=false, hasPendingPermission, ThreadManager pending maps, active bg tasks, or remote', () => {
+    const manager = makeManager({ idleReapMinutes: 1, maxLiveSessions: 0 });
+    const m = manager as any;
+    const base = 1_000_000;
+    const farFuture = base + 60 * 60_000;
+
+    const tTurn = manager.createThread('Turn in flight', '/tmp');
+    const sTurn = makeFakeSession({ turnInFlight: true });
+    injectSession(manager, tTurn.id, sTurn, base);
+
+    const tNoReap = manager.createThread('Cannot idle reap', '/tmp');
+    const sNoReap = makeFakeSession({ canIdleReap: () => false });
+    injectSession(manager, tNoReap.id, sNoReap, base);
+
+    const tSessionPerm = manager.createThread('Session pending permission', '/tmp');
+    const sSessionPerm = makeFakeSession({ hasPendingPermission: true });
+    injectSession(manager, tSessionPerm.id, sSessionPerm, base);
+
+    const tMgrPerm = manager.createThread('Manager pending permission', '/tmp');
+    const sMgrPerm = makeFakeSession();
+    injectSession(manager, tMgrPerm.id, sMgrPerm, base);
+    m.pendingPermissions.set(tMgrPerm.id, { toolName: 'Bash', detail: 'rm -rf' });
+
+    const tMgrPermResolver = manager.createThread('Manager permission resolver', '/tmp');
+    const sMgrPermResolver = makeFakeSession();
+    injectSession(manager, tMgrPermResolver.id, sMgrPermResolver, base);
+    m.permissionResolvers.set(tMgrPermResolver.id, () => {});
+
+    const tQuestion = manager.createThread('Pending question', '/tmp');
+    const sQuestion = makeFakeSession();
+    injectSession(manager, tQuestion.id, sQuestion, base);
+    m.pendingQuestionResolvers.set(tQuestion.id, () => {});
+
+    const tPlan = manager.createThread('Pending plan', '/tmp');
+    const sPlan = makeFakeSession();
+    injectSession(manager, tPlan.id, sPlan, base);
+    m.pendingPlanResolvers.set(tPlan.id, { approve: () => {}, reject: () => false });
+
+    const tBg = manager.createThread('Active bg task', '/tmp');
+    const sBg = makeFakeSession();
+    injectSession(manager, tBg.id, sBg, base);
+    m.activeBgTasks.set(tBg.id, new Map([['bg-1', { description: 'Running', startedAt: base }]]));
+
+    const tRemote = manager.createThread('Remote thread', '/tmp');
+    tRemote.remote = { daemonId: 'd-1', cwd: '/remote', remoteSessionId: 'rs-1' };
+    const sRemote = makeFakeSession();
+    injectSession(manager, tRemote.id, sRemote, base);
+
+    expect(manager.reapIdleSessions(farFuture)).toBe(0);
+    for (const s of [sTurn, sNoReap, sSessionPerm, sMgrPerm, sMgrPermResolver, sQuestion, sPlan, sBg, sRemote]) {
+      expect(s.close).not.toHaveBeenCalled();
+    }
+  });
+
+  it('enforces maxLiveSessions LRU cap by evicting oldest idle local sessions while skipping busy and remote sessions', () => {
+    const manager = makeManager({ idleReapMinutes: 0, maxLiveSessions: 2 });
+    const base = 1_000_000;
+
+    const tBusyOldest = manager.createThread('Busy oldest', '/tmp');
+    const sBusyOldest = makeFakeSession({ turnInFlight: true });
+    injectSession(manager, tBusyOldest.id, sBusyOldest, base + 1);
+
+    const tIdleOld = manager.createThread('Idle old', '/tmp');
+    tIdleOld.sessionId = 'sess-idle-old';
+    const sIdleOld = makeFakeSession();
+    injectSession(manager, tIdleOld.id, sIdleOld, base + 2);
+
+    const tIdleMid = manager.createThread('Idle mid', '/tmp');
+    const sIdleMid = makeFakeSession();
+    injectSession(manager, tIdleMid.id, sIdleMid, base + 3);
+
+    const tIdleNewest = manager.createThread('Idle newest', '/tmp');
+    const sIdleNewest = makeFakeSession();
+    injectSession(manager, tIdleNewest.id, sIdleNewest, base + 4);
+
+    // Remote session should not count against the local live cap
+    const tRemote = manager.createThread('Remote', '/tmp');
+    tRemote.remote = { daemonId: 'd-1', cwd: '/remote' };
+    const sRemote = makeFakeSession();
+    injectSession(manager, tRemote.id, sRemote, base);
+
+    // 4 local sessions with maxLiveSessions=2 -> evicts the 2 oldest eligible (tIdleOld, tIdleMid)
+    expect(manager.reapIdleSessions(base + 10)).toBe(2);
+    expect(sIdleOld.close).toHaveBeenCalledTimes(1);
+    expect(sIdleMid.close).toHaveBeenCalledTimes(1);
+    expect(tIdleOld.sessionId).toBe('sess-idle-old');
+
+    expect(sBusyOldest.close).not.toHaveBeenCalled();
+    expect(sIdleNewest.close).not.toHaveBeenCalled();
+    expect(sRemote.close).not.toHaveBeenCalled();
+  });
+
+  it('immediately enforces maxLiveSessions LRU cap when a new local session is registered', () => {
+    const manager = makeManager({ idleReapMinutes: 0, maxLiveSessions: 2 });
+    const base = 2_000_000;
+    manager.clock = () => base + 100;
+
+    const t1 = manager.createThread('T1', '/tmp');
+    const s1 = makeFakeSession();
+    injectSession(manager, t1.id, s1, base + 1);
+
+    const t2 = manager.createThread('T2', '/tmp');
+    const s2 = makeFakeSession();
+    injectSession(manager, t2.id, s2, base + 2);
+
+    const t3 = manager.createThread('T3', '/tmp');
+    const s3 = makeFakeSession();
+    (manager as any).registerSession(t3.id, s3, false);
+
+    // t1 (oldest idle) is immediately evicted; t2 and newly registered t3 remain
+    expect(s1.close).toHaveBeenCalledTimes(1);
+    expect(s2.close).not.toHaveBeenCalled();
+    expect(s3.close).not.toHaveBeenCalled();
+    expect((manager as any).sessions.has(t1.id)).toBe(false);
+    expect((manager as any).sessions.has(t2.id)).toBe(true);
+    expect((manager as any).sessions.has(t3.id)).toBe(true);
+  });
+
+  it('runs periodic sweep via startIdleReaper() and stops cleanly on destroy()', () => {
+    vi.useFakeTimers();
+    try {
+      const manager = makeManager({ idleReapMinutes: 1, maxLiveSessions: 0 });
+      const t = manager.createThread('Periodic', '/tmp');
+      const s = makeFakeSession();
+      injectSession(manager, t.id, s, Date.now());
+
+      manager.startIdleReaper(60_000);
+      vi.advanceTimersByTime(60_000);
+
+      expect(s.close).toHaveBeenCalledTimes(1);
+      expect((manager as any).sessions.has(t.id)).toBe(false);
+
+      manager.destroy();
+      expect((manager as any).idleReaperTimer).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

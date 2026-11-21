@@ -11,6 +11,7 @@ import { mergeUsageSnapshot, normalizeCodexAccountUsage, normalizeCodexRateLimit
 import { renderCodexAgentProfiles } from './AgentProfiles';
 import { CodexRawLog } from './CodexRawLog';
 import { browserToolSummary } from './browserSession';
+import { DEFAULT_KILL_GRACE_MS, processGroupSpawnOptions, terminateProcessTree } from './processTree';
 
 type CodexTokenUsageBreakdown = {
   totalTokens: number;
@@ -157,17 +158,25 @@ export class CodexSession {
   private activeSubagentTurns = new Map<string, string>();
   private resumeFallbackPending = false;
   private pendingQuestionRequestIds = new Set<string>();
+  private pendingPermissionRequestIds = new Set<string>();
   private localSkillCommands = new Map<string, { name: string; path: string; description: string }>();
   private localSkillsDiscovered = false;
   private policyUpdateTail: Promise<void> = Promise.resolve();
   private sessionGeneration = 0;
 
-  constructor(private codexPath: string) {}
+  constructor(private codexPath: string, private closeGraceMs = DEFAULT_KILL_GRACE_MS) {}
 
   get turnInFlight(): boolean { return this._turnInFlight; }
   get cwd(): string | undefined { return this.options?.cwd; }
-  get hasPendingPermission(): boolean { return false; }
-  canIdleReap(): boolean { return !this._turnInFlight && !this.awaitingPlanApproval; }
+  get hasPendingPermission(): boolean { return this.pendingPermissionRequestIds.size > 0; }
+  canIdleReap(): boolean {
+    return !this._turnInFlight
+      && !this.awaitingPlanApproval
+      && !this.approvalTransitionInFlight
+      && !this.hasPendingPermission
+      && this.pendingQuestionRequestIds.size === 0
+      && this.queuedTurns.length === 0;
+  }
 
   async start(options: HarnessSessionOptions): Promise<void> {
     this.close();
@@ -178,6 +187,7 @@ export class CodexSession {
     this.announcedSubagents.clear();
     this.activeSubagentTurns.clear();
     this.pendingQuestionRequestIds.clear();
+    this.pendingPermissionRequestIds.clear();
     this.localSkillCommands.clear();
     this.localSkillsDiscovered = false;
     this.resumeFallbackPending = false;
@@ -188,6 +198,7 @@ export class CodexSession {
       cwd: options.cwd,
       env: { ...process.env, ...parseExtraEnv(options.extraEnvRaw), ...(options.secretEnv ?? {}) },
       stdio: 'pipe',
+      ...processGroupSpawnOptions(),
     });
     const child = this.process;
     this.buffer = '';
@@ -544,9 +555,11 @@ export class CodexSession {
     this.turnStartPromise = null;
     this.queuedTurns = [];
     this.activeSubagentTurns.clear();
+    this.pendingPermissionRequestIds.clear();
     this.cancelPendingQuestionRequests();
-    this.process?.kill();
+    const proc = this.process;
     this.process = null;
+    if (proc) void terminateProcessTree(proc, { graceMs: this.closeGraceMs });
     this.codexThreadId = undefined;
     this.failAll(new Error('Codex session closed'));
   }
@@ -864,6 +877,7 @@ export class CodexSession {
       case 'serverRequest/resolved': {
         if (params.threadId && String(params.threadId) !== this.codexThreadId) break;
         const requestId = String(params.requestId ?? '');
+        this.pendingPermissionRequestIds.delete(requestId);
         if (this.pendingQuestionRequestIds.delete(requestId)) callbacks.onAskUserQuestionCanceled?.();
         break;
       }
@@ -914,13 +928,21 @@ export class CodexSession {
       if (isEmptyForm && callbacks?.onPermissionRequest) {
         const serverName = String(params.serverName ?? 'server');
         const detail = String(params.message ?? `${serverName} requests permission to continue`);
+        const requestId = String(message.id);
+        this.pendingPermissionRequestIds.add(requestId);
         callbacks.onPermissionRequest(`MCP: ${serverName}`, detail)
-          .then((allow) => this.respond(message.id, {
-            action: allow ? 'accept' : 'decline',
-            content: allow ? {} : null,
-            _meta: null,
-          }))
-          .catch(() => this.respond(message.id, { action: 'decline', content: null, _meta: null }));
+          .then((allow) => {
+            this.pendingPermissionRequestIds.delete(requestId);
+            this.respond(message.id, {
+              action: allow ? 'accept' : 'decline',
+              content: allow ? {} : null,
+              _meta: null,
+            });
+          })
+          .catch(() => {
+            this.pendingPermissionRequestIds.delete(requestId);
+            this.respond(message.id, { action: 'decline', content: null, _meta: null });
+          });
         return;
       }
       if (!callbacks?.onElicitation) {
@@ -941,13 +963,21 @@ export class CodexSession {
             mode: 'form' as const,
             requestedSchema,
           };
+      const requestId = String(message.id);
+      this.pendingPermissionRequestIds.add(requestId);
       callbacks.onElicitation(request, new AbortController().signal)
-        .then((result) => this.respond(message.id, {
-          action: result.action,
-          content: result.action === 'accept' ? (result.content ?? {}) : null,
-          _meta: null,
-        }))
-        .catch(() => this.respond(message.id, { action: 'cancel', content: null, _meta: null }));
+        .then((result) => {
+          this.pendingPermissionRequestIds.delete(requestId);
+          this.respond(message.id, {
+            action: result.action,
+            content: result.action === 'accept' ? (result.content ?? {}) : null,
+            _meta: null,
+          });
+        })
+        .catch(() => {
+          this.pendingPermissionRequestIds.delete(requestId);
+          this.respond(message.id, { action: 'cancel', content: null, _meta: null });
+        });
       return;
     }
     if (message.method === 'item/tool/call') {
@@ -980,12 +1010,18 @@ export class CodexSession {
           this.respond(message.id, { success: false, contentItems: [{ type: 'inputText', text: `Permission denied for ${dynamicTool.name}.` }] });
           return;
         }
+        const requestId = String(message.id);
+        this.pendingPermissionRequestIds.add(requestId);
         callbacks.onPermissionRequest(`Agent Threads: ${dynamicTool.name}`, detail)
           .then((allow) => {
+            this.pendingPermissionRequestIds.delete(requestId);
             if (allow) invoke();
             else this.respond(message.id, { success: false, contentItems: [{ type: 'inputText', text: `Permission denied for ${dynamicTool.name}.` }] });
           })
-          .catch(() => this.respond(message.id, { success: false, contentItems: [{ type: 'inputText', text: `Permission denied for ${dynamicTool.name}.` }] }));
+          .catch(() => {
+            this.pendingPermissionRequestIds.delete(requestId);
+            this.respond(message.id, { success: false, contentItems: [{ type: 'inputText', text: `Permission denied for ${dynamicTool.name}.` }] });
+          });
       } else {
         invoke();
       }
@@ -1006,10 +1042,16 @@ export class CodexSession {
       return;
     }
     const detail = String(params.command ?? params.reason ?? 'Codex requests permission to continue');
+    const requestId = String(message.id);
+    this.pendingPermissionRequestIds.add(requestId);
     callbacks.onPermissionRequest('Codex', detail).then((allow) => {
+      this.pendingPermissionRequestIds.delete(requestId);
       const decision = allow ? 'accept' : 'decline';
       this.respond(message.id, message.method.includes('fileChange') ? { decision } : { decision });
-    }).catch(() => this.respond(message.id, { decision: 'decline' }));
+    }).catch(() => {
+      this.pendingPermissionRequestIds.delete(requestId);
+      this.respond(message.id, { decision: 'decline' });
+    });
   }
 
   private handleRequestUserInput(id: string | number, params: any, callbacks: SessionCallbacks | undefined): void {
