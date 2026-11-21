@@ -81,6 +81,13 @@ import { serializeThreadForSave } from './imageExternalization';
 import type { HostExecHooks } from './hostExec';
 import { mapLocalToRemote, mapRemoteToLocal } from './remote/vaultMapping';
 import { stripLegacySandboxSettings } from './legacySandboxVm';
+import {
+  migrateHarnessSettings,
+  normalizeCatalogEntries,
+  resolveDefaultPermissionMode,
+  updateCatalogEntries,
+  type CachedHarnessModel,
+} from './harnessSettings';
 import { selectIdleThreadsForArchive } from './autoArchive';
 import { createDeferredThreadArchiver } from './deferredThreadArchive';
 import { getVaultBridgesAPI, findBridgesForFiles, type BridgeInfo } from './bridgeUtils';
@@ -109,13 +116,14 @@ import { createRemoteFolderSource, type RemoteFolderSource } from './remote/fold
 import { createRemoteReposSource, type RemoteReposSource } from './remote/repos';
 import { RemoteSkillsSync, resolveSkillsSyncMode } from './remote/skillsSync';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
-import { setKnownSecretsProvider } from './secretRedaction';
+import { redactForStorage, setKnownSecretsProvider } from './secretRedaction';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
 import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProject } from './secretUtils';
 import { scheduleVaultThreadRecovery } from './vaultThreadRecovery';
 import { resolveProjectVaultRoot } from './projectPaths';
 import { stripLegacyOrchestratorHeartbeats } from './legacyHeartbeats';
 import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, canWriteManagerNotes, repairStaleProjectOrchestrators, resolveCoordinationRole } from './coordinationScope';
+import { resolveOrchestratorLedgerPath } from './orchestratorCharter';
 import {
   sharedPersistenceWriterFence,
   type PersistenceWriterToken,
@@ -901,8 +909,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
             const caller = this.manager.getThread(threadId);
             const target = this.manager.getThread(targetId);
             if (!caller || !target) return false;
-            const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, this.manager.getProjects());
-            if (operation === 'notes') return canWriteManagerNotes(role, target.projectId);
+            const projects = this.manager.getProjects();
+            const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, projects);
+            if (operation === 'notes') return canWriteManagerNotes(role, target.projectId, elevatedProjectId, projects);
             return authorizeThreadAccess(role, target.projectId, elevatedProjectId);
           },
           authorizeProjectDestination: (projectId, elevatedProjectId, targetThreadId) => {
@@ -931,6 +940,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
               lastError: t.lastError,
               reviewed: t.reviewed,
               projectId: t.projectId,
+              ...(t.goal ? { goal: t.goal } : {}),
               cwd: t.cwd,
               originRepoPath: t.originRepoPath,
               projectNameOverride: t.projectNameOverride,
@@ -1037,6 +1047,79 @@ export default class ClaudeThreadsPlugin extends Plugin {
             }
             this.manager.notifyManagerNotesChanged(id);
             this.saveSettings().catch(console.error);
+          },
+          getOrchestratorLedger: async (params) => {
+            const caller = this.manager.getThread(threadId);
+            if (!caller) throw new Error('Target is outside coordination scope.');
+            const targetProjectId = params.projectId === null
+              ? undefined
+              : params.projectId !== undefined
+                ? params.projectId.trim()
+                : caller.projectId;
+            if (params.projectId !== undefined && params.projectId !== null && !targetProjectId) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const projects = this.manager.getProjects();
+            const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, projects);
+            if (!authorizeThreadAccess(role, targetProjectId, params.elevatedProjectId)) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const project = targetProjectId !== undefined ? this.manager.getProject(targetProjectId) : undefined;
+            if (targetProjectId !== undefined && !project) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const ledgerPath = normalizePath(resolveOrchestratorLedgerPath(project ? project.name : null));
+            const existing = this.app.vault.getAbstractFileByPath(ledgerPath);
+            if (!(existing instanceof TFile)) {
+              return { path: ledgerPath, exists: false, content: '' };
+            }
+            const content = await this.app.vault.read(existing);
+            return { path: ledgerPath, exists: true, content };
+          },
+          setOrchestratorLedger: async (params) => {
+            const caller = this.manager.getThread(threadId);
+            if (!caller) throw new Error('Target is outside coordination scope.');
+            const targetProjectId = params.projectId === null
+              ? undefined
+              : params.projectId !== undefined
+                ? params.projectId.trim()
+                : caller.projectId;
+            if (params.projectId !== undefined && params.projectId !== null && !targetProjectId) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const projects = this.manager.getProjects();
+            const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, projects);
+            if (!canWriteManagerNotes(role, targetProjectId, params.elevatedProjectId, projects)) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const project = targetProjectId !== undefined ? this.manager.getProject(targetProjectId) : undefined;
+            if (targetProjectId !== undefined && !project) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const ledgerPath = normalizePath(resolveOrchestratorLedgerPath(project ? project.name : null));
+            const redacted = redactForStorage(params.content);
+            const existing = this.app.vault.getAbstractFileByPath(ledgerPath);
+            if (existing && !(existing instanceof TFile)) {
+              throw new Error(`Ledger path is occupied by a folder: ${ledgerPath}`);
+            }
+            if (existing instanceof TFile) {
+              await this.app.vault.modify(existing, redacted);
+            } else if (redacted.length > 0) {
+              const parts = ledgerPath.split('/').slice(0, -1);
+              let currentDir = '';
+              for (const part of parts) {
+                currentDir = currentDir ? `${currentDir}/${part}` : part;
+                if (!this.app.vault.getAbstractFileByPath(currentDir)) {
+                  try {
+                    await this.app.vault.createFolder(currentDir);
+                  } catch {
+                    // Folder may have been created concurrently.
+                  }
+                }
+              }
+              await this.app.vault.create(ledgerPath, redacted);
+            }
+            return { path: ledgerPath, bytes: new TextEncoder().encode(redacted).length };
           },
           setThreadProposedReply: (id: string, text: string) => {
             const thread = this.manager.getThread(id);
@@ -1284,6 +1367,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.register(this.manager.subscribe(() => {
       this.googleWorkspaceMcp?.retainThreads(new Set(this.manager.getThreads().filter(thread => thread.status !== 'archived').map(thread => thread.id)));
       this.oauthMcpRegistry?.retainThreads(new Set(this.manager.getThreads().filter(thread => thread.status !== 'archived').map(thread => thread.id)));
+    }));
+    this.register(this.manager.subscribe((threadId, event) => {
+      if (event.type !== 'capabilities_discovered' || event.models.length === 0) return;
+      const harness = this.manager.getThread(threadId)?.agentHarness ?? 'claude';
+      this.recordDiscoveredModels(harness, event.models, 'merge');
     }));
 
     // AgentRun state is a crash-recovery record, so persist every lifecycle
@@ -2086,6 +2174,49 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: 'reset-orchestrator-session',
+      name: 'Reset orchestrator session (fresh context)',
+      callback: async () => {
+        if (!this.manager) {
+          new Notice('No active orchestrator thread found to reset.');
+          return;
+        }
+        const activeId = this.getView()?.getActiveThreadId?.();
+        const projects = this.manager.getProjects();
+        const isOrch = (id: string | null | undefined): id is string =>
+          !!id
+          && !!this.manager.getThread(id)
+          && (id === this.settings.orchestratorThreadId || projects.some(p => p.orchestratorThreadId === id));
+        const activeThread = activeId ? this.manager.getThread(activeId) : undefined;
+        const activeProjectOrchId = activeThread?.projectId
+          ? this.manager.getProject(activeThread.projectId)?.orchestratorThreadId
+          : undefined;
+        const targetId = isOrch(activeId)
+          ? activeId
+          : isOrch(activeProjectOrchId)
+            ? activeProjectOrchId
+            : isOrch(this.settings.orchestratorThreadId)
+              ? this.settings.orchestratorThreadId
+              : undefined;
+        const target = targetId ? this.manager.getThread(targetId) : undefined;
+        if (!targetId || !target) {
+          new Notice('No active orchestrator thread found to reset.');
+          return;
+        }
+        if (this.manager.isRunning(targetId)) {
+          new Notice(`"${target.title}" is currently running — interrupt it before resetting its session.`);
+          return;
+        }
+        if (!this.manager.resetThreadSession(targetId)) {
+          new Notice('No active orchestrator thread found to reset.');
+          return;
+        }
+        await this.saveSettings();
+        new Notice(`Reset "${target.title}" — next turn starts with a fresh context window.`);
+      },
+    });
+
+    this.addCommand({
       id: 'reload-plugin-safely',
       name: 'Reload plugin (safe)',
       callback: async () => {
@@ -2156,7 +2287,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Scheduled sessions should not block on permission prompts. When the
     // global permissionMode is 'default' (ask every time), override to
     // 'dontAsk' so unattended runs complete without hanging.
-    if (!thread.permissionMode && this.settings.permissionMode === 'default') {
+    if (!thread.permissionMode && resolveDefaultPermissionMode(this.settings, thread.agentHarness) === 'default') {
       thread.permissionMode = 'dontAsk';
     }
     // Record the scheduled item that created this thread, for the
@@ -3339,7 +3470,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       agentTools: this.agentTools,
       helpProviders: this.helpProviders,
       slashCommands: this.slashCommands,
-      getDefaultPermissionMode: () => this.settings.permissionMode,
+      getDefaultPermissionMode: (harness) => resolveDefaultPermissionMode(this.settings, harness),
       artifactStore: createArtifactStore({
         vaultRoot: () => this.manager.vaultRoot,
         getThread: (id) => this.manager.getThread(id),
@@ -3720,12 +3851,55 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return promise;
   }
 
-  /** Problems to surface in Settings and the model menu; empty when healthy or not applicable. */
+    /** Problems to surface in Settings and the model menu; empty when healthy or not applicable. */
   getClaudeCliProblems(): CliProblem[] {
     if (Platform.isMobile) return [];
     const info = this.claudeCliInfo?.binaryPath === this.settings.claudeBinaryPath ? this.claudeCliInfo : undefined;
     const missing = findMissingKnownModels(this.discoveredModelsByHarness.claude, Object.values(FALLBACK_RESOLVED));
     return describeCliProblems(info, missing);
+  }
+
+  /**
+   * Records discovered models for `harness` in memory and persists them under
+   * `settings.discoveredModelsCache` when the catalog actually changed.
+   */
+  recordDiscoveredModels(
+    harness: AgentHarness,
+    models: ReadonlyArray<{ value?: unknown; displayName?: unknown; description?: unknown; resolvedModel?: unknown }>,
+    mode: 'merge' | 'replace' = 'merge',
+  ): boolean {
+    const current = this.discoveredModelsByHarness[harness] ?? [];
+    const { entries, changed } = updateCatalogEntries(current as unknown as CachedHarnessModel[], models, mode);
+    if (!changed && current.length === entries.length) return false;
+    const sdkShaped = entries.map((m) => ({
+      value: m.value,
+      displayName: m.displayName,
+      description: m.description ?? '',
+      ...(m.resolvedModel ? { resolvedModel: m.resolvedModel } : {}),
+    })) as import('@anthropic-ai/claude-agent-sdk').ModelInfo[];
+    this.discoveredModelsByHarness[harness] = sdkShaped;
+    if (harness === 'claude') this.discoveredModels = [...sdkShaped];
+    this.settings.discoveredModelsCache = {
+      ...(this.settings.discoveredModelsCache ?? {}),
+      [harness]: entries,
+    };
+    if (changed) void this.saveSettings().catch(console.error);
+    return changed;
+  }
+
+  /**
+   * Probes the local CLI for `harness` on demand (Settings → Agent → "Refresh models")
+   * and replaces its cached model catalog. Desktop-only.
+   */
+  async refreshHarnessModels(harness: AgentHarness): Promise<CachedHarnessModel[]> {
+    if (Platform.isMobile) return [];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { probeHarnessModels } = require('./harnessModelProbe') as typeof import('./harnessModelProbe');
+    const models = await probeHarnessModels(harness, this.settings, this.getEffectiveCwd());
+    if (models.length > 0) {
+      this.recordDiscoveredModels(harness, models, 'replace');
+    }
+    return models;
   }
 
   private detectClaudeBinary(): void {
@@ -4590,6 +4764,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
     if (storedKey && !storedKey.startsWith('sk-')) {
       this.app.secretStorage.setSecret('openai-api-key', '');
     }
+
+    // Migrate legacy single defaultModel to per-harness defaults and hydrate cached model catalogs.
+    migrateHarnessSettings(this.settings);
+    const cachedCatalogs = this.settings.discoveredModelsCache ?? {};
+    for (const harness of ['claude', 'codex', 'opencode', 'antigravity'] as const) {
+      const entries = normalizeCatalogEntries(cachedCatalogs[harness]);
+      this.discoveredModelsByHarness[harness] = entries.map((m) => ({
+        value: m.value,
+        displayName: m.displayName,
+        description: m.description ?? '',
+        ...(m.resolvedModel ? { resolvedModel: m.resolvedModel } : {}),
+      })) as import('@anthropic-ai/claude-agent-sdk').ModelInfo[];
+    }
+    this.discoveredModels = [...this.discoveredModelsByHarness.claude];
   }
 
   /**

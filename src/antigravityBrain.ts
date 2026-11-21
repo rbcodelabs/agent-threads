@@ -2,13 +2,14 @@
  * Local brain transcript reader and subagent/wakeup state tracker for Antigravity (`agy acp`).
  *
  * Why this exists:
- * `agy acp` (verified against ACP server 1.5.8 / 1.5.9) streams `session/update` notifications only for the parent
- * session's active `session/prompt` RPC. It omits the spawned child `conversationId` from `invoke_subagent` tool updates,
- * emits no child subagent progress or completion notifications over ACP, and runs reactive wakeup turns (triggered when
- * a child subagent or background task sends a message or goes idle) internally after `session/prompt` has already
- * returned. Meanwhile, `agy` writes deterministic step-by-step JSONL state logs for the parent and every child
- * conversation under `<brainDir>/<conversationId>/.system_generated/logs/transcript_full.jsonl` (falling back to
- * `transcript.jsonl`).
+ * - On `agy acp` 1.5.8 / 1.5.9, `agy` streams `session/update` notifications only for the parent session's active
+ *   `session/prompt` RPC and runs post-turn reactive wakeups silently on disk.
+ * - On `agy acp` 1.5.11+, `agy` (`sendOutOfTurnStepUpdates`) streams parent reactive wakeups over ACP (`agent_thought_chunk`,
+ *   `agent_message_chunk`, `tool_call`, `tool_call_update`, `session/request_permission`, `elicitation/create`), while
+ *   still omitting child `conversationId`s, child subagent progress/completion events, background task IDs, and an ACP
+ *   end-of-wakeup response.
+ * Meanwhile, `agy` writes deterministic step-by-step JSONL state logs for the parent and every child conversation under
+ * `<brainDir>/<conversationId>/.system_generated/logs/transcript_full.jsonl` (falling back to `transcript.jsonl`).
  *
  * Mobile/core invariant:
  * This module sits in the daemon/mobile core closure (imported by `AntigravitySession.ts`). Never import Node built-ins
@@ -56,6 +57,17 @@ export interface AntigravityBrainOptions {
   wakeupToolStallMs?: number;
   /** Settle delay (default 150ms) between `session/cancel` and continuation `session/prompt` on stalled wakeup promotion. */
   wakeupCancelSettleMs?: number;
+  /**
+   * Drain window (default 150ms) when an `agy acp` 1.5.11+ out-of-turn wakeup writes its terminal `PLANNER_RESPONSE` to
+   * `transcript_full.jsonl` slightly before stdout delivers the corresponding `agent_message_chunk`. Cleared immediately
+   * when the chunk arrives; falls back to `step.content` if stdout omits it.
+   */
+  outOfTurnTextDrainMs?: number;
+  /**
+   * Idle settle fallback (default 300ms) for spontaneous out-of-turn ACP wakeups when no local brain transcript file is
+   * present on disk (`!brainReader.hasTranscript(sessionId)`).
+   */
+  outOfTurnNoBrainIdleMs?: number;
 }
 
 export interface PendingSubagentSpawnMeta {

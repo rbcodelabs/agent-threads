@@ -1,5 +1,12 @@
 import { agentHarnessLabel, type AgentHarness } from './types';
+import {
+  resolveDefaultPermissionMode,
+  resolveEffectivePermissionMode,
+  resolveHarnessDefaultModel,
+} from './harnessSettings';
 import { buildProjectOverviewContext, composeAppendSystemPrompt, readProjectOverview } from './projectOverview';
+import { describeOrchestratorThread } from './orchestratorThreads';
+import { ORCHESTRATOR_ROLE_DISALLOWED_TOOLS, buildOrchestratorCharter, buildOrchestratorGoalContext } from './orchestratorCharter';
 import { extractUrls } from './urlLinks';
 import { PeerSkillRegistry } from './PeerSkills';
 import { mergeDisallowedTools } from './toolRestrictions';
@@ -1449,7 +1456,7 @@ export class ThreadManager {
       // control-request on the live Query, no restart needed.
       const session = this.sessions.get(id);
       if (session) {
-        const effectiveMode = mode ?? this.settings.permissionMode;
+        const effectiveMode = mode ?? resolveDefaultPermissionMode(this.settings, thread.agentHarness);
         session.setPermissionMode(effectiveMode).catch((err) => {
           console.error('[ClaudeThreads] setThreadPermissionMode: live setPermissionMode() failed:', err);
         });
@@ -1941,6 +1948,55 @@ export class ThreadManager {
     this.emit(threadId, { type: 'message', message });
   }
 
+  /**
+   * Messages eligible for fallback history replay on an unresumed session,
+   * excluding anything before the most recent `resetThreadSession()` boundary.
+   */
+  private messagesAfterContextReset(thread: Thread, dropLast = false): ChatMessage[] {
+    const end = dropLast ? Math.max(0, thread.messages.length - 1) : thread.messages.length;
+    const start = Math.min(Math.max(0, thread.contextResetAtMessageCount ?? 0), end);
+    return thread.messages.slice(start, end);
+  }
+
+  /**
+   * Resets an idle thread's underlying harness session so the next turn starts with
+   * a genuinely fresh context window (`resume = undefined` and zero pre-reset
+   * fallback history), while keeping the visible message transcript, thread ID,
+   * Project assignment, and `/goal` intact. Returns `false` if the thread does not
+   * exist or is actively running a turn.
+   */
+  resetThreadSession(threadId: string): boolean {
+    const thread = this.threads.get(threadId);
+    if (!thread || this.isRunning(threadId)) return false;
+    thread.sessionGeneration = (thread.sessionGeneration ?? 0) + 1;
+    delete thread.sessionId;
+    delete thread.pendingHarnessHandoff;
+    delete thread.pendingBackgroundTasks;
+    delete thread.tasks;
+    delete thread.usageSnapshot;
+    delete thread.lastError;
+    if (thread.remote) {
+      delete thread.remote.nativeSessionId;
+      delete thread.remote.turnPending;
+    }
+    this.sessionRestartRequested.delete(threadId);
+    this.threadActivity.delete(threadId);
+    const oldSession = this.sessions.get(threadId);
+    if (oldSession) {
+      oldSession.close();
+      this.sessions.delete(threadId);
+    }
+    this.selectedAgentRuns.delete(threadId);
+    if (thread.status === 'active' || thread.status === 'reconnecting' || thread.status === 'error') {
+      thread.status = 'waiting';
+    }
+    this.addNoticeMessage(threadId, 'completed', 'Session context reset — next turn starts with a fresh context window.');
+    thread.contextResetAtMessageCount = thread.messages.length;
+    this.emit(threadId, { type: 'tasks_updated', tasks: [] });
+    this.emit(threadId, { type: 'run_state_settled' });
+    return true;
+  }
+
   private getGoalContextState(threadId: string): GoalContextState {
     let state = this.goalContextStates.get(threadId);
     if (!state) {
@@ -2160,7 +2216,7 @@ export class ThreadManager {
       return false;
     }
 
-    const priorMessages = thread.messages;
+    const priorMessages = this.messagesAfterContextReset(thread, false);
     const effectivePrompt = !thread.sessionId && priorMessages.length > 0
       ? buildHistoryPreamble(priorMessages, thread.cwd) + message
       : message;
@@ -2276,7 +2332,7 @@ export class ThreadManager {
     // Claude escalation takes precedence. Codex rejects the Claude-only
     // keyword before creating a transcript entry or native session.
     const model = resolvedPrompt.model ?? thread.model
-      ?? ((thread.agentHarness ?? 'claude') !== 'claude' ? undefined : (this.settings.defaultModel || undefined));
+      ?? resolveHarnessDefaultModel(this.settings, thread.agentHarness);
     const promptText = resolvedPrompt.promptText;
     const claimedHandoff = this.claimHarnessHandoff(threadId);
 
@@ -2369,11 +2425,14 @@ export class ThreadManager {
       return;
     }
 
-    // If there is no session to resume but there IS prior history, the cwd must
-    // have changed mid-conversation (via obsidian_set_working_directory). Inject
-    // the prior turns as a preamble so Claude isn't amnesiac after the switch.
-    const priorMessages = thread.messages.slice(0, -1); // excludes the just-pushed user msg
+    // If there is no session to resume but there IS prior history after the most
+    // recent context reset, the cwd must have changed mid-conversation (via
+    // obsidian_set_working_directory). Inject post-reset turns as a preamble so
+    // Claude isn't amnesiac after the switch, while keeping resetThreadSession()
+    // genuinely fresh.
+    const priorMessages = this.messagesAfterContextReset(thread, true); // excludes pre-reset msgs and the just-pushed user msg
     const isFreshUnresumedSession = !thread.sessionId && priorMessages.length > 0;
+    const hasPostResetStart = !thread.sessionId && (priorMessages.length > 0 || (thread.contextResetAtMessageCount ?? 0) > 0);
     const handoffPrompt = claimedHandoff
       ? buildHarnessHandoffPrompt(thread, claimedHandoff.sourceHarness, claimedHandoff.targetHarness)
       : undefined;
@@ -2392,7 +2451,7 @@ export class ThreadManager {
     // ID, so a leftover incomplete task silently gets its content overwritten
     // and flipped to whatever status the new session's same-ID task reaches.
     // Clear both so the new session starts with a clean board.
-    if (isFreshUnresumedSession) {
+    if (hasPostResetStart) {
       delete thread.tasks;
       delete thread.pendingBackgroundTasks;
       this.emit(threadId, { type: 'tasks_updated', tasks: [] });
@@ -2542,11 +2601,18 @@ export class ThreadManager {
       this.settings.saveThreadsToVault,
       this.hostName,
     );
+    const orchestratorRole = describeOrchestratorThread(threadId, {
+      portfolioThreadId: this.settings.orchestratorThreadId,
+      projects: this.getProjects(),
+    });
+    const orchestratorCharter = orchestratorRole ? buildOrchestratorCharter(orchestratorRole) : undefined;
     const projectDesc = project?.description?.trim();
     const goalContext = thread.goal
-      ? `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
-        'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
-        'state what remains and continue working on it. The goal stays active until the user clears it with /goal clear.'
+      ? orchestratorRole
+        ? buildOrchestratorGoalContext(thread.goal)
+        : `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
+          'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
+          'state what remains and continue working on it. The goal stays active until the user clears it with /goal clear.'
       : '';
     // INTENTIONAL: thread.managerNotes, thread.proposedReply and
     // thread.pendingDecisions are never included
@@ -2557,7 +2623,13 @@ export class ThreadManager {
     // its own prior "grading" of the thread and the orchestrator's draft before
     // Rick has approved it. Do not "fix" this by adding them to the list.
     const overviewContext = buildProjectOverviewContext(readProjectOverview(project, rel => this.readVaultFileSync(rel)));
-    const appendSystemPrompt = composeAppendSystemPrompt({ envContext, projectDesc, overviewContext, goalContext });
+    const appendSystemPrompt = composeAppendSystemPrompt({
+      envContext,
+      projectDesc,
+      overviewContext,
+      orchestratorCharter,
+      goalContext,
+    });
     const sessionMcpServers = this.mcpServerFactory ? this.mcpServerFactory(threadId, thread.cwd) : this.mcpServers;
     // Baseline for stale detection: options are rebuilt every turn but only used
     // when the session (re)starts, so record once per session object.
@@ -2578,7 +2650,7 @@ export class ThreadManager {
     const agentProfiles = loadAgentProfiles(this.settings.skillSources ?? []);
     // One skill-root list for every harness that discovers by parent directory
     // (Codex via skills/extraRoots/set, OpenCode via its native skills.paths).
-    const skillRoots = codexSkillRoots(
+    const baseSkillRoots = codexSkillRoots(
       this.settings.skillSources ?? [],
       this.pluginResourceDir
         ? require('path').join(this.pluginResourceDir, 'resources', 'skills')
@@ -2588,12 +2660,23 @@ export class ThreadManager {
       pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
       this.localSkillsRoot(),
     );
+    const peerSkillsDirs = this.peerSkills.list().length > 0
+      ? [...new Set(this.peerSkillPlugins().map(p => (require('path') as typeof import('path')).dirname(p.path)))]
+      : [];
+    const skillRoots = [...new Set([...baseSkillRoots, ...peerSkillsDirs])];
+    const roleScopedDisallowed = orchestratorRole
+      ? mergeDisallowedTools(thread.disallowedTools, ORCHESTRATOR_ROLE_DISALLOWED_TOOLS)
+      : thread.disallowedTools?.length
+        ? [...thread.disallowedTools]
+        : undefined;
+
+    const effectivePermissionMode = resolveEffectivePermissionMode(this.settings, thread);
 
     return {
       cwd: thread.cwd,
-      permissionMode: thread.permissionMode ?? this.settings.permissionMode,
-      // Per-thread denylist (restriction-only; see toolRestrictions.ts).
-      ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
+      permissionMode: effectivePermissionMode,
+      // Per-thread denylist + non-inherited orchestrator role lockout (see toolRestrictions.ts & orchestratorCharter.ts).
+      ...(roleScopedDisallowed?.length ? { disallowedTools: roleScopedDisallowed } : {}),
       extraEnvRaw: effectiveExtraEnv(this.settings),
       // Session IDs are harness-specific. Existing threads predate the field
       // and are Claude threads, so they never get passed to Codex.
@@ -2601,7 +2684,7 @@ export class ThreadManager {
       callbacks: this.buildSessionCallbacks(threadId, thread),
       additionalDirectories: additionalDirs,
       // modelOverride carries sendMessage()'s escalation-aware `model` local
-      // (keywordModel ?? thread.model ?? settings.defaultModel) through to a
+      // (keywordModel ?? thread.model ?? harnessDefaultModel) through to a
       // brand-new session's start(). Without it, a thread's first-ever
       // message silently dropped the /escalate keyword: this method used to
       // independently recompute `thread.model ?? settings.defaultModel`,
@@ -2613,28 +2696,29 @@ export class ThreadManager {
       // and fall back to the plain thread.model — correct there, since a
       // cwd-change restart isn't a new user message and has no escalation
       // keyword to apply.
-      // settings.defaultModel holds Claude aliases; other harnesses use their own default.
-      model: (thread.agentHarness ?? 'claude') !== 'claude'
-        ? (modelOverride ?? thread.model ?? undefined)
-        : modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
+      model: modelOverride ?? thread.model ?? resolveHarnessDefaultModel(this.settings, thread.agentHarness),
       appendSystemPrompt,
       resumeFallbackHistory: thread.sessionId
-        ? buildHistoryPreamble(
-            latestMessageIsCurrentSend ? thread.messages.slice(0, -1) : thread.messages,
-            thread.cwd,
-          )
+        ? (() => {
+            const fallbackMsgs = this.messagesAfterContextReset(thread, latestMessageIsCurrentSend);
+            return fallbackMsgs.length > 0 ? buildHistoryPreamble(fallbackMsgs, thread.cwd) : undefined;
+          })()
         : undefined,
       secretEnv: resolvedSecretEnv,
       claude: {
         mcpServers: sessionMcpServers,
-        disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
+        disallowedTools: mergeDisallowedTools(
+          this.settings.disallowedTools,
+          thread.disallowedTools,
+          orchestratorRole ? ORCHESTRATOR_ROLE_DISALLOWED_TOOLS : undefined,
+        ),
         sessionOptions: this.buildSessionOptions(thread, agentProfiles),
       },
       codex: {
         computerUseEnabled: this.settings.codexComputerUseEnabled === true,
         networkAccessEnabled: thread.codexNetworkAccessEnabled ?? this.settings.codexNetworkAccessDefault === true,
         localSkillsRoot: this.localSkillsRoot(),
-        ...resolveCodexPermissions(thread.permissionMode ?? this.settings.permissionMode),
+        ...resolveCodexPermissions(effectivePermissionMode),
         ...(this.settings.codexEffort && this.settings.codexEffort !== 'default'
           ? { effort: this.settings.codexEffort }
           : {}),
@@ -2674,10 +2758,17 @@ export class ThreadManager {
     const mounts = this.remoteDaemons?.mountsOf?.(remote.daemonId);
     const hostToolsEnabled = !!this.remoteHostToolsFactory && this.remoteDaemons?.hostToolsOf?.(remote.daemonId)?.enabled === true;
     const harness: AgentHarness = thread.agentHarness ?? 'claude';
+    const orchestratorRole = describeOrchestratorThread(threadId, {
+      portfolioThreadId: this.settings.orchestratorThreadId,
+      projects: this.getProjects(),
+    });
+    const orchestratorCharter = orchestratorRole ? buildOrchestratorCharter(orchestratorRole) : undefined;
     const goalContext = thread.goal
-      ? `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
-        'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
-        'state what remains and continue working on it. The goal stays active until the user clears it with /goal clear.'
+      ? orchestratorRole
+        ? buildOrchestratorGoalContext(thread.goal)
+        : `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
+          'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
+          'state what remains and continue working on it. The goal stays active until the user clears it with /goal clear.'
       : '';
     const appendSystemPrompt = [
       buildRemoteEnvironmentPrompt(
@@ -2690,6 +2781,7 @@ export class ThreadManager {
         { hostTools: hostToolsEnabled, ...(mounts?.length ? { mounts } : {}) },
       ),
       project?.description?.trim(),
+      orchestratorCharter,
       goalContext,
     ].filter(Boolean).join('\n\n');
     const agentProfiles = loadAgentProfiles(this.settings.skillSources ?? []);
@@ -2699,28 +2791,38 @@ export class ThreadManager {
     const partition = partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist, this.remoteDaemons?.mcpSyncOf?.(remote.daemonId));
     const resume = thread.sessionId;
     const extras = this.remoteSessionExtras?.(threadId);
+    const effectivePermissionMode = resolveEffectivePermissionMode(this.settings, thread);
     const common = {
       cwd: remote.remoteCwd,
-      permissionMode: thread.permissionMode ?? this.settings.permissionMode,
+      permissionMode: effectivePermissionMode,
       extraEnvRaw: '',
       resume,
       callbacks: this.buildSessionCallbacks(threadId, thread),
       appendSystemPrompt,
       resumeFallbackHistory: resume
-        ? buildHistoryPreamble(
-            latestMessageIsCurrentSend ? thread.messages.slice(0, -1) : thread.messages,
-            remote.remoteCwd,
-          )
+        ? (() => {
+            const fallbackMsgs = this.messagesAfterContextReset(thread, latestMessageIsCurrentSend);
+            return fallbackMsgs.length > 0 ? buildHistoryPreamble(fallbackMsgs, remote.remoteCwd) : undefined;
+          })()
         : undefined,
     };
     const passthrough = Object.keys(partition.passthrough).length ? partition.passthrough : undefined;
+    const remoteRoleDisallowed = orchestratorRole
+      ? mergeDisallowedTools(thread.disallowedTools, ORCHESTRATOR_ROLE_DISALLOWED_TOOLS)
+      : thread.disallowedTools?.length
+        ? [...thread.disallowedTools]
+        : undefined;
     if (harness === 'claude') {
       return {
         ...common,
-        ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
-        model: modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
+        ...(remoteRoleDisallowed?.length ? { disallowedTools: remoteRoleDisallowed } : {}),
+        model: modelOverride ?? thread.model ?? resolveHarnessDefaultModel(this.settings, 'claude'),
         claude: {
-          disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
+          disallowedTools: mergeDisallowedTools(
+            this.settings.disallowedTools,
+            thread.disallowedTools,
+            orchestratorRole ? ORCHESTRATOR_ROLE_DISALLOWED_TOOLS : undefined,
+          ),
           sessionOptions: this.buildSessionOptions(thread, agentProfiles),
           ...(passthrough ? { remoteMcpServers: passthrough } : {}),
           ...(extras?.envKind ? { remoteEnvKind: extras.envKind } : {}),
@@ -2728,21 +2830,25 @@ export class ThreadManager {
         },
       };
     }
-    // Codex, OpenCode and Antigravity: Claude's model aliases mean nothing to them (as for a local thread), the
+    // Codex, OpenCode and Antigravity: resolve each harness's own default model, the
     // denylist is the top-level one (Claude's tool names are ignored by the daemon's adapters except Bash/edits), and
     // the vetted MCP servers go in the harness's own block, which `projectSessionOptions` reads back. An explicit
     // three-way choice: a new harness must be added here, not silently become OpenCode.
-    const disallowed = mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools);
+    const disallowed = mergeDisallowedTools(
+      this.settings.disallowedTools,
+      thread.disallowedTools,
+      orchestratorRole ? ORCHESTRATOR_ROLE_DISALLOWED_TOOLS : undefined,
+    );
     const mcpBlock = passthrough ? { mcpServers: passthrough } : {};
     return {
       ...common,
       ...(disallowed.length ? { disallowedTools: disallowed } : {}),
-      model: modelOverride ?? thread.model ?? undefined,
+      model: modelOverride ?? thread.model ?? resolveHarnessDefaultModel(this.settings, harness),
       ...(harness === 'codex'
         ? {
             codex: {
               networkAccessEnabled: thread.codexNetworkAccessEnabled === true,
-              ...resolveCodexPermissions(thread.permissionMode ?? this.settings.permissionMode),
+              ...resolveCodexPermissions(effectivePermissionMode),
               ...(this.settings.codexEffort && this.settings.codexEffort !== 'default' ? { effort: this.settings.codexEffort } : {}),
               ...mcpBlock,
             },

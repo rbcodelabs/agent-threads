@@ -15,6 +15,7 @@ for (const width of [1280, 390]) {
       document.querySelector<HTMLElement>('#app')!.style.width = 'min(760px, 100vw)';
     });
     await page.getByLabel('Settings section').selectOption('claude');
+    await page.getByRole('tab', { name: /OpenAI Codex/ }).click();
     const setting = page.locator('.setting-item').filter({ hasText: 'Codex computer use' });
     const toggle = setting.locator('.checkbox-container');
     await expect(toggle).not.toHaveClass(/is-enabled/);

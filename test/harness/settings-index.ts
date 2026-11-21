@@ -288,6 +288,21 @@ const mockPlugin = {
   discoveredModelsByHarness: {
     claude: [],
     codex: [{ value: 'gpt-5.6-codex', displayName: 'GPT-5.6 Codex' }],
+    opencode: [{ value: 'anthropic/claude-sonnet-4-5', displayName: 'Anthropic: Claude Sonnet 4.5' }],
+    antigravity: [
+      { value: 'gemini-4-carbon-medium', displayName: 'Gemini 4 Carbon (Medium)' },
+      { value: 'gemini-4-carbon-high', displayName: 'Gemini 4 Carbon (High)' },
+    ],
+  },
+  refreshHarnessModels: async (harness: 'claude' | 'codex' | 'opencode' | 'antigravity') => {
+    const hook = (window as any).__mockRefreshModels as ((h: string) => Promise<Array<{ value: string; displayName: string }>>) | undefined;
+    const models = hook ? await hook(harness) : (mockPlugin.discoveredModelsByHarness[harness] ?? []);
+    if (models.length > 0) {
+      mockPlugin.discoveredModelsByHarness[harness] = [...models] as any;
+      settings.discoveredModelsCache = { ...(settings.discoveredModelsCache ?? {}), [harness]: [...models] };
+      await mockPlugin.saveSettings();
+    }
+    return models;
   },
   manager: {
     getProjects: () => settings.projects,

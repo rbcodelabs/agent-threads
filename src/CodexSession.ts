@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
-import { isShellDenied } from './toolRestrictions';
+import { isEditDenied, isShellDenied } from './toolRestrictions';
 import * as path from 'path';
 import fs from 'fs';
 import type { AskQuestion, ImageAttachment } from './types';
@@ -1001,6 +1001,10 @@ export class CodexSession {
       this.respond(message.id, { decision: 'decline' });
       return;
     }
+    if (/fileChange/i.test(message.method) && isEditDenied(this.options?.disallowedTools)) {
+      this.respond(message.id, { decision: 'decline' });
+      return;
+    }
     const detail = String(params.command ?? params.reason ?? 'Codex requests permission to continue');
     callbacks.onPermissionRequest('Codex', detail).then((allow) => {
       const decision = allow ? 'accept' : 'decline';
@@ -1010,6 +1014,10 @@ export class CodexSession {
 
   private handleRequestUserInput(id: string | number, params: any, callbacks: SessionCallbacks | undefined): void {
     const reject = () => this.respond(id, { answers: {} });
+    if ((this.options?.disallowedTools ?? []).includes('AskUserQuestion')) {
+      reject();
+      return;
+    }
     if (!this._turnInFlight
       || String(params.threadId ?? '') !== this.codexThreadId
       || (this.activeTurnId !== undefined && String(params.turnId ?? '') !== this.activeTurnId)

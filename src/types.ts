@@ -639,6 +639,12 @@ export interface Thread {
    */
   disallowedTools?: string[];
   /**
+   * Message index recorded by `ThreadManager.resetThreadSession()` so the next
+   * unresumed session starts with zero pre-reset history in `buildHistoryPreamble`
+   * while preserving the full visible transcript in the UI.
+   */
+  contextResetAtMessageCount?: number;
+  /**
    * Background tasks (Bash run_in_background: true) that started during a session
    * but didn't emit a task_notification before the stream ended. The plugin polls
    * these automatically and clears them when completions arrive.
@@ -1252,11 +1258,32 @@ export interface PluginSettings {
   /** Account/backend the Claude CLI authenticates against. Defaults to 'claude'. */
   provider: ProviderMode;
   /**
-   * Model alias applied to threads that have no per-thread override
-   * (set via /model). Empty string = let the CLI use its own default.
-   * Accepts the same aliases as /model: fable, opus, sonnet, haiku.
+   * Legacy Claude-only model alias applied to Claude threads that have no
+   * per-thread override (set via /model). Kept mirrored with
+   * `defaultModelByHarness.claude` for backwards compatibility; use
+   * `resolveHarnessDefaultModel` / `setHarnessDefaultModel` (`src/harnessSettings.ts`).
    */
   defaultModel: string;
+  /**
+   * Default model ID/alias per harness provider (`claude`, `codex`, `opencode`, `antigravity`).
+   * Absent or empty string means "CLI default" for that harness.
+   */
+  defaultModelByHarness?: Partial<Record<AgentHarness, string>>;
+  /**
+   * Optional default permission mode override per harness provider.
+   * Absent means inherit the global `permissionMode` (Settings → Tools).
+   */
+  permissionModeByHarness?: Partial<Record<AgentHarness, PluginSettings['permissionMode']>>;
+  /**
+   * Persisted non-secret model catalogs last discovered from each harness's local CLI,
+   * so Settings and new-thread model menus remain populated across restarts.
+   */
+  discoveredModelsCache?: Partial<Record<AgentHarness, Array<{
+    value: string;
+    displayName: string;
+    description?: string;
+    resolvedModel?: string;
+  }>>>;
   summarizationEnabled: boolean;
   inprocessModel: string;
   autoSummarize: boolean;

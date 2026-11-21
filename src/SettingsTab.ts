@@ -1,8 +1,14 @@
 import { isValidOverviewPath } from './projectOverview';
-import { effectiveExtraEnv, isAgentHarness, parseExtraEnv } from './types';
+import { AGENT_HARNESSES, effectiveExtraEnv, isAgentHarness, parseExtraEnv, type AgentHarness } from './types';
+import {
+  resolveHarnessDefaultModel,
+  resolveHarnessPermissionModeOverride,
+  setHarnessDefaultModel,
+  setHarnessPermissionModeOverride,
+} from './harnessSettings';
 import { normalizeToolCallStyle } from './toolNameUtils';
 import { buildClaudeModelOptions } from './modelOptions';
-import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
+import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting, setIcon } from 'obsidian';
 import type { ButtonComponent, TextComponent } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { deepLinkScheme } from './hostEnvironment';
@@ -1579,9 +1585,28 @@ const FALLBACK_MODELS: { value: string; displayName: string }[] = [
   { value: 'claude-haiku-5-5', displayName: 'Claude Haiku 5.5' },
 ];
 
+const PROVIDER_TAB_LABELS: Record<AgentHarness, string> = {
+  claude: 'Claude Code',
+  codex: 'OpenAI Codex',
+  opencode: 'OpenCode',
+  antigravity: 'Antigravity',
+};
+
+const PERMISSION_MODE_LABELS: Record<PluginSettings['permissionMode'], string> = {
+  default: 'Prompt for permissions',
+  acceptEdits: 'Accept edits automatically',
+  bypassPermissions: 'Bypass all permissions',
+  plan: 'Plan only (read & propose, no execute)',
+  dontAsk: 'Silent deny (CI/cron)',
+  auto: 'Auto-approve',
+};
+
 export class ClaudeThreadsSettingTab extends PluginSettingTab {
   /** Survives re-renders (display() is called after toggles, modals, etc.). */
   private activeTab: SettingsTabId = 'general';
+  private selectedHarnessTab: AgentHarness | null = null;
+  private refreshingHarnessModels = new Set<AgentHarness>();
+  private harnessRefreshStatus = new Map<AgentHarness, { text: string; isError?: boolean }>();
   private selectedProjectId: string | null = null;
   private selectedSecretName: string | null = null;
   private mcpSyncUnsub: (() => void) | null = null;
@@ -1589,6 +1614,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   /** Switch the (single-pane) settings to a section before it is opened. */
   showSection(id: SettingsTabId): void {
     this.activeTab = id;
+  }
+
+  /** Switch to Settings → Agent with a specific harness provider tab selected. */
+  showHarnessProvider(harness: AgentHarness): void {
+    this.activeTab = 'claude';
+    this.selectedHarnessTab = harness;
   }
 
   showNewProject(): void {
@@ -1620,34 +1651,49 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   }
 
   /**
-   * Adds model options to a dropdown. Family aliases appear first (always
-   * track the latest release), followed by pinned model IDs sourced from the
-   * SDK capabilities query, falling back to a hardcoded list when no session
-   * has run yet.
+   * Adds model options for `harness` to a dropdown. For Claude, family aliases
+   * appear first followed by pinned catalog models (with a built-in fallback).
+   * For Codex, OpenCode, and Antigravity, options come from each harness's
+   * discovered/cached catalog. Any saved `currentValue` not yet in the catalog
+   * is preserved so opening Settings before discovery never resets it.
    */
-  private addModelOptions(
+  private addModelOptionsForHarness(
     dropdown: import('obsidian').DropdownComponent,
-    opts: { includeCliDefault?: boolean } = {},
+    harness: AgentHarness,
+    opts: { includeCliDefault?: boolean; currentValue?: string } = {},
   ): void {
+    const seen = new Set<string>();
     if (opts.includeCliDefault) {
       dropdown.addOption('', 'CLI default');
+      seen.add('');
     }
-    const harness = this.plugin.settings.agentHarness ?? 'claude';
-    const discovered = this.plugin.discoveredModelsByHarness[harness];
+    const discovered = this.plugin.discoveredModelsByHarness?.[harness] ?? [];
     if (harness === 'claude') {
-      // Family aliases (Claude Code-specific, never sent to Codex) labelled
-      // with the version they resolve to, then pinned models labelled from
-      // their ids. Same rows as the per-thread model menu.
       for (const opt of buildClaudeModelOptions(discovered.length > 0 ? discovered : FALLBACK_MODELS)) {
-        if (opt.value) dropdown.addOption(opt.value, opt.label);
+        if (opt.value && !seen.has(opt.value)) {
+          dropdown.addOption(opt.value, opt.label);
+          seen.add(opt.value);
+        }
       }
-      return;
+    } else {
+      for (const m of discovered) {
+        if (m.value && !seen.has(m.value)) {
+          dropdown.addOption(m.value, m.displayName || m.value);
+          seen.add(m.value);
+        }
+      }
     }
-    // Codex, OpenCode and Antigravity intentionally have no guessed fallback: wait for their
-    // native model catalogs so we never offer a model the account cannot use.
-    for (const m of discovered) {
-      dropdown.addOption(m.value, m.displayName);
+    const saved = (opts.currentValue ?? '').trim();
+    if (saved && !seen.has(saved)) {
+      dropdown.addOption(saved, `${saved} (saved)`);
     }
+  }
+
+  private addModelOptions(
+    dropdown: import('obsidian').DropdownComponent,
+    opts: { includeCliDefault?: boolean; currentValue?: string } = {},
+  ): void {
+    this.addModelOptionsForHarness(dropdown, this.plugin.settings.agentHarness ?? 'claude', opts);
   }
 
   display(): void {
@@ -1949,10 +1995,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   // ── Agent harness ───────────────────────────────────────────────────────
 
   private renderClaudeTab(containerEl: HTMLElement): void {
-    if (this.fixedSection) new Setting(containerEl).setName('Harness & sandbox').setHeading();
-    const harnessSetting = new Setting(containerEl)
+    // Loaded lazily here (desktop-only) so custom addIcon() calls stay out of mobile init.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { HARNESS_BRAND_ICONS } = require('./harnessBrandIcons') as typeof import('./harnessBrandIcons');
+
+    // ── Shared workspace & agent defaults ───────────────────────────────────
+    const sharedEl = containerEl.createDiv({ cls: 'ct-agent-shared-defaults' });
+
+    const harnessSetting = new Setting(sharedEl)
       .setName('Agent harness')
-      .setDesc('New threads use this local coding agent. Existing threads retain the harness that created them.')
+      .setDesc('Default local coding agent for new threads. Existing threads retain the harness that created them. Configure each provider below.')
       .addDropdown((dropdown) =>
         dropdown
           .addOption('claude', 'Claude Code')
@@ -1961,7 +2013,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .addOption('antigravity', 'Antigravity')
           .setValue(this.plugin.settings.agentHarness ?? 'claude')
           .onChange(async (value) => {
-            this.plugin.settings.agentHarness = isAgentHarness(value) ? value : 'claude';
+            const nextHarness: AgentHarness = isAgentHarness(value) ? value : 'claude';
+            this.plugin.settings.agentHarness = nextHarness;
+            this.selectedHarnessTab = nextHarness;
             this.plugin.manager.updateSettings(this.plugin.settings);
             await this.plugin.saveSettings();
             this.display();
@@ -1982,78 +2036,24 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       if (managed) harnessSetting.descEl.createDiv({ cls: 'ct-managed-note is-visible', text: 'Managed by your administrator: some harnesses are not allowed on this computer.' });
     }
 
-    new Setting(containerEl)
-      .setName('Codex binary path')
-      .setDesc('Path to the codex executable. Codex threads use its local app-server for streaming, approvals, and durable sessions.')
+    new Setting(sharedEl)
+      .setName('Default working directory')
+      .setDesc('Starting directory for new threads when no Project folder applies. Leave empty to use the vault root.')
       .addText((text) =>
         text
-          .setPlaceholder('codex')
-          .setValue(this.plugin.settings.codexBinaryPath ?? 'codex')
+          .setPlaceholder(this.plugin.getEffectiveCwd())
+          .setValue(this.plugin.settings.defaultCwd)
           .onChange(async (value) => {
-            this.plugin.settings.codexBinaryPath = value || 'codex';
-            this.plugin.manager.updateSettings(this.plugin.settings);
+            this.plugin.settings.defaultCwd = value;
             await this.plugin.saveSettings();
-          }),
+          })
+          .then((component) => this.addDirectoryBrowse(component.inputEl, this.plugin.settings.defaultCwd || undefined)),
       );
 
-    new Setting(containerEl)
-      .setName('OpenCode binary path')
-      .setDesc('Path to the opencode executable (desktop only). OpenCode threads run a local "opencode serve" per session and use the providers, API keys, and models configured in OpenCode. Model IDs use provider/model form, e.g. openai/gpt-5.')
-      .addText((text) =>
-        text
-          .setPlaceholder('opencode')
-          .setValue(this.plugin.settings.opencodeBinaryPath ?? 'opencode')
-          .onChange(async (value) => {
-            this.plugin.settings.opencodeBinaryPath = value || 'opencode';
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Antigravity binary path')
-      .setDesc('Path to the agy executable (desktop only). Antigravity threads run a local "agy acp" per session and use the Google sign-in and model catalog of your Antigravity CLI: run agy once and sign in first. The model menu is filled from the CLI when a thread starts.')
-      .addText((text) =>
-        text
-          .setPlaceholder('agy')
-          .setValue(this.plugin.settings.antigravityBinaryPath ?? 'agy')
-          .onChange(async (value) => {
-            this.plugin.settings.antigravityBinaryPath = value || 'agy';
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Codex computer use')
-      .setDesc('Allow Codex computer-use capabilities from your local Codex configuration. Off by default; shared Codex browser tools may also be disabled. Changes apply when a Codex session next starts or restarts; existing sessions keep their current access. Use “Reload plugin (safe)” after active work finishes to apply to all sessions.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.codexComputerUseEnabled === true)
-          .onChange(async (value) => {
-            this.plugin.settings.codexComputerUseEnabled = value;
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Codex network access default')
-      .setDesc('Default network access for local Codex threads using “Use default”. Off by default. Explicit On or Off thread choices are preserved; Plan mode still denies network access and remote threads are unchanged. Changes apply when a local Codex session next starts or restarts; existing sessions keep their current access. Choose “Use default” in a thread to apply the current default immediately.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.codexNetworkAccessDefault === true)
-          .onChange(async (value) => {
-            this.plugin.settings.codexNetworkAccessDefault = value;
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
+    new Setting(sharedEl)
       .setName('Worktree location')
       .setDesc(
-        'Where enter_worktree creates worktrees. Leave empty to use ~/.geode/worktrees. '
+        'Where enter_worktree creates worktrees across all harnesses. Leave empty to use ~/.geode/worktrees. '
         + 'Must be durable storage — a temp directory is cleared on reboot, which deletes '
         + 'the worktree and any uncommitted work in it.',
       )
@@ -2070,7 +2070,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
 
     // GitHub connection (Geode >= 0.25 only; hidden elsewhere so Obsidian is unchanged).
     if (this.plugin.githubBroker?.available) {
-      new Setting(containerEl)
+      new Setting(sharedEl)
         .setName('Use Geode GitHub connection')
         .setDesc(
           'Let threads use the GitHub account connected in Geode (Settings → GitHub) for git over HTTPS, the gh CLI and '
@@ -2095,7 +2095,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
             }),
         );
 
-      new Setting(containerEl)
+      new Setting(sharedEl)
         .setName('GitHub commit email')
         .setDesc(
           'Email used for commits made with the Geode connection. Leave empty to use your GitHub noreply address '
@@ -2114,251 +2114,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         );
     }
 
-    if (this.fixedSection) new Setting(containerEl).setName('Claude').setHeading();
-    new Setting(containerEl)
-      .setName('Claude binary path')
-      .setDesc('Path to the claude executable. Leave empty to find it on $PATH.')
-      .addText((text) =>
-        text
-          .setPlaceholder('/opt/homebrew/bin/claude')
-          .setValue(this.plugin.settings.claudeBinaryPath)
-          .onChange(async (value) => {
-            this.plugin.settings.claudeBinaryPath = value;
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-            scheduleCliProbe();
-          }),
-      );
-
-    // Detected CLI version + stale-install warnings (desktop only). Re-probed
-    // shortly after the path stops changing; never upgrades anything itself.
-    const cliNoticeEl = containerEl.createDiv({ cls: 'ct-cli-notice' });
-    const renderCliNotice = (): void => {
-      if (!cliNoticeEl.isConnected) return;
-      cliNoticeEl.empty();
-      if (Platform.isMobile) return;
-      const info = this.plugin.claudeCliInfo;
-      if (info?.binaryPath === this.plugin.settings.claudeBinaryPath && info.version) {
-        cliNoticeEl.createDiv({ cls: 'ct-cli-notice-version setting-item-description', text: `Detected claude CLI ${info.version}` });
-      }
-      for (const problem of this.plugin.getClaudeCliProblems()) {
-        const row = cliNoticeEl.createDiv({ cls: problem.severity === 'warning' ? 'ct-settings-warning ct-cli-notice-row' : 'ct-cli-notice-row ct-cli-notice-soft' });
-        row.createSpan({ text: problem.message });
-        const command = problem.upgradeCommand;
-        if (command) {
-          const copy = row.createEl('button', { cls: 'ct-cli-notice-copy', text: 'Copy command' });
-          copy.addEventListener('click', () => {
-            void navigator.clipboard.writeText(command).then(() => new Notice('Copied upgrade command'));
-          });
-        }
-      }
-    };
-    let cliProbeTimer: number | undefined;
-    const scheduleCliProbe = (): void => {
-      window.clearTimeout(cliProbeTimer);
-      cliProbeTimer = window.setTimeout(() => { void this.plugin.refreshClaudeCliInfo().then(renderCliNotice); }, 600);
-    };
-    renderCliNotice();
-    void this.plugin.refreshClaudeCliInfo().then(renderCliNotice);
-
-    new Setting(containerEl)
-      .setName('Account / provider')
-      .setDesc(
-        'Claude account uses the CLI\'s own login. ' +
-        'Amazon Bedrock sets CLAUDE_CODE_USE_BEDROCK=1 — also add AWS_PROFILE and AWS_REGION under Extra environment variables.',
-      )
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('claude', 'Claude account (default)')
-          .addOption('bedrock', 'Amazon Bedrock')
-          .setValue(this.plugin.settings.provider ?? 'claude')
-          .onChange(async (value) => {
-            this.plugin.settings.provider = value as ProviderMode;
-            awsCredsSetting.settingEl.style.display = value === "bedrock" && !Platform.isMobile ? "" : "none";
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    // Bedrock-only: verify (and, if needed, refresh) AWS credentials without
-    // waiting for a turn to fail. Desktop only — reads the AWS config and SSO token cache directly.
-    const awsCredsSetting = new Setting(containerEl)
-      .setName("AWS credentials")
-      .setDesc("Checks the profile from Extra environment variables (AWS_PROFILE), falling back to the default profile.");
-    // style.display, not HTMLElement.toggle(): Geode's DOM shim has no toggle(), and the
-    // throw aborted display() so every setting below this row never rendered.
-    awsCredsSetting.settingEl.style.display = (this.plugin.settings.provider ?? "claude") === "bedrock" && !Platform.isMobile ? "" : "none";
-    const awsStatus = awsCredsSetting.descEl.createDiv({ cls: "ct-auth-status" });
-    const runAwsCheck = async (): Promise<void> => {
-      awsStatus.setText("Checking…");
-      awsStatus.removeClass("is-error");
-      const res = await checkAwsCredentialsNow(this.plugin.settings);
-      if (res.ok) awsStatus.setText(`Signed in — account ${res.account}`);
-      else {
-        awsStatus.addClass("is-error");
-        awsStatus.setText(res.expired ? "Not signed in (SSO session expired or missing)." : res.error);
-      }
-    };
-    // The local daemon is desktop-only, so is this.
-    if (!Platform.isMobile) new Setting(containerEl)
-      .setName('AWS profiles for the local daemon')
-      .setDesc(
-        'One profile per line. Threads that run on the local daemon (Run on: This Mac (container)) get a trimmed AWS config '
-        + 'containing only these profiles, plus the AWS_PROFILE from Extra environment variables, and the SSO token of each '
-        + 'profile\'s session (only that session\'s token file). Copied before each message, so a fresh sign-in on this Mac '
-        + 'reaches the daemon. Amazon Bedrock threads always get their AWS_PROFILE. Leave empty to share nothing extra.',
-      )
-      .addTextArea((ta) =>
-        ta
-          .setPlaceholder('my-deploy-profile')
-          .setValue(this.plugin.settings.containerAwsProfiles ?? '')
-          .onChange(async (value) => {
-            this.plugin.settings.containerAwsProfiles = value;
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    awsCredsSetting
-      .addButton((btn) => btn.setButtonText("Check").onClick(() => void runAwsCheck()))
-      .addButton((btn) =>
-        btn.setButtonText("Sign in").onClick(async () => {
-          btn.setDisabled(true);
-          try {
-            const profile = resolveSignInProfile(this.plugin.settings);
-            const res = await reauthenticateAws(this.plugin.settings, undefined, {
-              onProgress: (t) => awsStatus.setText(profile ? `${t} (profile ${profile})` : t),
-            });
-            if (res.ok) await runAwsCheck();
-            else {
-              awsStatus.addClass("is-error");
-              awsStatus.setText(res.error);
-            }
-          } finally {
-            btn.setDisabled(false);
-          }
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName('Default model')
-      .setDesc(
-        'Model for new turns unless a thread overrides it with /model. ' +
-          '"CLI default" defers to the Claude Code CLI configuration. ' +
-          'Aliases always track the latest version; pinned IDs lock to a specific release. ' +
-          'Start a thread to populate the full model list from the CLI.',
-      )
-      .addDropdown((dropdown) => {
-        this.addModelOptions(dropdown, { includeCliDefault: true });
-        return dropdown
-          .setValue(this.plugin.settings.defaultModel ?? '')
-          .onChange(async (value) => {
-            this.plugin.settings.defaultModel = value;
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName('Thinking mode')
-      .setDesc('Controls extended reasoning. "Adaptive" lets Claude decide; "Enabled" uses a fixed token budget; "Disabled" turns off extended thinking.')
-      .addDropdown((drop) =>
-        drop
-          .addOption('disabled', 'Disabled')
-          .addOption('adaptive', 'Adaptive (Claude decides)')
-          .addOption('enabled', 'Enabled (fixed token budget)')
-          .setValue(this.plugin.settings.thinkingMode ?? 'disabled')
-          .onChange(async (value) => {
-            this.plugin.settings.thinkingMode = value as PluginSettings['thinkingMode'];
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Thinking token budget')
-      .setDesc('Maximum tokens for thinking when mode is "Enabled".')
-      .addText((text) =>
-        text
-          .setPlaceholder('8000')
-          .setValue(String(this.plugin.settings.thinkingBudgetTokens ?? 8000))
-          .onChange(async (value) => {
-            const n = parseInt(value, 10);
-            if (!isNaN(n) && n > 0) {
-              this.plugin.settings.thinkingBudgetTokens = n;
-              await this.plugin.saveSettings();
-            }
-          }),
-      );
-
-    const isCodex = (this.plugin.settings.agentHarness ?? 'claude') === 'codex';
-    new Setting(containerEl)
-      .setName(isCodex ? 'Codex effort level' : 'Effort level')
-      .setDesc(isCodex
-        ? 'How much reasoning effort Codex applies. Ultra enables proactive native agents on supported models; Default uses the model default.'
-        : 'How much reasoning effort Claude applies. "Default" uses the CLI default.')
-      .addDropdown((drop) => {
-        drop
-          .addOption('default', 'Default')
-          .addOption('low', 'Low (fastest)')
-          .addOption('medium', 'Medium')
-          .addOption('high', 'High')
-          .addOption('xhigh', isCodex ? 'Extra high' : 'Extra high (Opus 4.7+)')
-          .addOption('max', isCodex ? 'Max' : 'Max (Opus 4.6+, Sonnet 4.6)');
-        if (isCodex) drop.addOption('ultra', 'Ultra (proactive agents)');
-        return drop
-          .setValue(isCodex ? (this.plugin.settings.codexEffort ?? 'default') : (this.plugin.settings.effort ?? 'default'))
-          .onChange(async (value) => {
-            if (isCodex) this.plugin.settings.codexEffort = value as PluginSettings['codexEffort'];
-            else this.plugin.settings.effort = value as PluginSettings['effort'];
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName('Agent progress summaries')
-      .setDesc('When enabled, running subagents emit an AI-generated progress summary every ~30 seconds.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.agentProgressSummaries ?? true)
-          .onChange(async (value) => {
-            this.plugin.settings.agentProgressSummaries = value;
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Enable 1M context window (beta)')
-      .setDesc('Passes the context-1m-2025-08-07 beta header for Sonnet 4/4.5. Requires a model that supports it.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.enable1MContext ?? false)
-          .onChange(async (value) => {
-            this.plugin.settings.enable1MContext = value;
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Default working directory')
-      .setDesc('Starting directory for new threads. Leave empty to use the vault root.')
-      .addText((text) =>
-        text
-          .setPlaceholder(this.plugin.getEffectiveCwd())
-          .setValue(this.plugin.settings.defaultCwd)
-          .onChange(async (value) => {
-            this.plugin.settings.defaultCwd = value;
-            await this.plugin.saveSettings();
-          })
-          .then((component) => this.addDirectoryBrowse(component.inputEl, this.plugin.settings.defaultCwd || undefined)),
-      );
-
-    // — Environment —
-    new Setting(containerEl).setName('Environment').setHeading();
-
-    new Setting(containerEl)
+    new Setting(sharedEl)
       .setName('Extra environment variables')
-      .setDesc('KEY=VALUE pairs (one per line) merged into the Claude process environment.')
+      .setDesc('KEY=VALUE pairs (one per line) merged into local agent session environments.')
       .addTextArea((text) =>
         text
           .setPlaceholder('AWS_PROFILE=my-sso-profile\nAWS_REGION=us-east-1')
@@ -2370,57 +2128,533 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
+    // ── Per-provider tabs & settings ────────────────────────────────────────
+    const providersEl = containerEl.createDiv({ cls: 'ct-agent-providers-section' });
+    const headerEl = providersEl.createDiv({ cls: 'ct-agent-providers-header' });
+    headerEl.createDiv({ cls: 'ct-agent-providers-title', text: 'Harness providers' });
+    headerEl.createDiv({
+      cls: 'ct-agent-providers-desc setting-item-description',
+      text: 'Configure binary paths, default models, permission overrides, and options per provider without changing your default harness.',
+    });
+
+    const defaultHarness: AgentHarness = this.plugin.settings.agentHarness ?? 'claude';
+    const activeProvider: AgentHarness = this.selectedHarnessTab ?? defaultHarness;
+
+    const tabList = providersEl.createDiv({
+      cls: 'ct-provider-tabs',
+      attr: { role: 'tablist', 'aria-label': 'Harness providers' },
+    });
+
+    for (const h of AGENT_HARNESSES) {
+      const isSelected = h === activeProvider;
+      const btn = tabList.createEl('button', {
+        cls: 'ct-provider-tab' + (isSelected ? ' is-active' : ''),
+        attr: {
+          type: 'button',
+          role: 'tab',
+          id: `ct-provider-tab-${h}`,
+          'aria-selected': String(isSelected),
+          'aria-controls': `ct-provider-panel-${h}`,
+          tabindex: isSelected ? '0' : '-1',
+          'data-harness': h,
+        },
+      });
+      const iconSpan = btn.createSpan({ cls: 'ct-provider-tab-icon', attr: { 'aria-hidden': 'true' } });
+      setIcon(iconSpan, HARNESS_BRAND_ICONS[h]);
+      btn.createSpan({ cls: 'ct-provider-tab-label', text: PROVIDER_TAB_LABELS[h] });
+      if (h === defaultHarness) {
+        btn.createSpan({ cls: 'ct-provider-tab-badge', text: 'Default' });
+      }
+      btn.addEventListener('click', () => {
+        if (activeProvider === h && this.selectedHarnessTab === h) return;
+        this.selectedHarnessTab = h;
+        this.display();
+      });
+      btn.addEventListener('keydown', (e: KeyboardEvent) => {
+        const idx = AGENT_HARNESSES.indexOf(h);
+        let nextIdx = -1;
+        if (e.key === 'ArrowRight') nextIdx = (idx + 1) % AGENT_HARNESSES.length;
+        else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + AGENT_HARNESSES.length) % AGENT_HARNESSES.length;
+        else if (e.key === 'Home') nextIdx = 0;
+        else if (e.key === 'End') nextIdx = AGENT_HARNESSES.length - 1;
+        if (nextIdx < 0) return;
+        e.preventDefault();
+        const nextH = AGENT_HARNESSES[nextIdx];
+        this.selectedHarnessTab = nextH;
+        this.display();
+        this.containerEl.querySelector<HTMLButtonElement>(`#ct-provider-tab-${nextH}`)?.focus();
+      });
+    }
+
+    const panelEl = providersEl.createDiv({
+      cls: 'ct-provider-panel',
+      attr: {
+        role: 'tabpanel',
+        id: `ct-provider-panel-${activeProvider}`,
+        'aria-labelledby': `ct-provider-tab-${activeProvider}`,
+      },
+    });
+    this.renderHarnessProviderPanel(panelEl, activeProvider);
+
     // macOS privacy notice
     const macOSNote = containerEl.createDiv({ cls: 'ct-settings-notice' });
     macOSNote.createEl('strong', { text: 'macOS users: ' });
     macOSNote.appendText(
-      'The first time Claude accesses a folder like ~/Documents, macOS shows a privacy dialog. ' +
+      'The first time an agent accesses a folder like ~/Documents, macOS shows a privacy dialog. ' +
       'Click Allow — it only appears once per folder.',
     );
+  }
 
-    // — Model escalation —
-    new Setting(containerEl).setName('Model escalation').setHeading();
-
-    new Setting(containerEl)
-      .setName('Enable model escalation')
-      .setDesc('When the keyword appears in a message, route that single turn to the escalation model. The keyword is stripped before sending.')
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.escalationEnabled).onChange(async (value) => {
-          this.plugin.settings.escalationEnabled = value;
-          this.plugin.manager.updateSettings(this.plugin.settings);
-          await this.plugin.saveSettings();
-          this.display();
-        }),
-      );
-
-    if (this.plugin.settings.escalationEnabled) {
-      new Setting(containerEl)
-        .setName('Escalation keyword')
-        .setDesc('Word or phrase that triggers escalation.')
+  private renderHarnessProviderPanel(panelEl: HTMLElement, provider: AgentHarness): void {
+    // 1. Provider binary path
+    if (provider === 'claude') {
+      new Setting(panelEl)
+        .setName('Claude binary path')
+        .setDesc('Path to the claude executable. Leave empty to find it on $PATH.')
         .addText((text) =>
           text
-            .setPlaceholder('/escalate')
-            .setValue(this.plugin.settings.escalationKeyword)
+            .setPlaceholder('/opt/homebrew/bin/claude')
+            .setValue(this.plugin.settings.claudeBinaryPath)
             .onChange(async (value) => {
-              this.plugin.settings.escalationKeyword = value || '/escalate';
+              this.plugin.settings.claudeBinaryPath = value;
+              this.plugin.manager.updateSettings(this.plugin.settings);
+              await this.plugin.saveSettings();
+              scheduleCliProbe();
+            }),
+        );
+
+      // Detected CLI version + stale-install warnings (desktop only). Re-probed
+      // shortly after the path stops changing; never upgrades anything itself.
+      const cliNoticeEl = panelEl.createDiv({ cls: 'ct-cli-notice' });
+      const renderCliNotice = (): void => {
+        if (!cliNoticeEl.isConnected) return;
+        cliNoticeEl.empty();
+        if (Platform.isMobile) return;
+        const info = this.plugin.claudeCliInfo;
+        if (info?.binaryPath === this.plugin.settings.claudeBinaryPath && info.version) {
+          cliNoticeEl.createDiv({ cls: 'ct-cli-notice-version setting-item-description', text: `Detected claude CLI ${info.version}` });
+        }
+        for (const problem of this.plugin.getClaudeCliProblems()) {
+          const row = cliNoticeEl.createDiv({ cls: problem.severity === 'warning' ? 'ct-settings-warning ct-cli-notice-row' : 'ct-cli-notice-row ct-cli-notice-soft' });
+          row.createSpan({ text: problem.message });
+          const command = problem.upgradeCommand;
+          if (command) {
+            const copy = row.createEl('button', { cls: 'ct-cli-notice-copy', text: 'Copy command' });
+            copy.addEventListener('click', () => {
+              void navigator.clipboard.writeText(command).then(() => new Notice('Copied upgrade command'));
+            });
+          }
+        }
+      };
+      let cliProbeTimer: number | undefined;
+      const scheduleCliProbe = (): void => {
+        window.clearTimeout(cliProbeTimer);
+        cliProbeTimer = window.setTimeout(() => { void this.plugin.refreshClaudeCliInfo().then(renderCliNotice); }, 600);
+      };
+      renderCliNotice();
+      void this.plugin.refreshClaudeCliInfo().then(renderCliNotice);
+    } else if (provider === 'codex') {
+      new Setting(panelEl)
+        .setName('Codex binary path')
+        .setDesc('Path to the codex executable. Codex threads use its local app-server for streaming, approvals, and durable sessions.')
+        .addText((text) =>
+          text
+            .setPlaceholder('codex')
+            .setValue(this.plugin.settings.codexBinaryPath ?? 'codex')
+            .onChange(async (value) => {
+              this.plugin.settings.codexBinaryPath = value || 'codex';
+              this.plugin.manager.updateSettings(this.plugin.settings);
+              await this.plugin.saveSettings();
+            }),
+        );
+    } else if (provider === 'opencode') {
+      new Setting(panelEl)
+        .setName('OpenCode binary path')
+        .setDesc('Path to the opencode executable (desktop only). OpenCode threads run a local "opencode serve" per session and use the providers, API keys, and models configured in OpenCode. Model IDs use provider/model form, e.g. openai/gpt-5.')
+        .addText((text) =>
+          text
+            .setPlaceholder('opencode')
+            .setValue(this.plugin.settings.opencodeBinaryPath ?? 'opencode')
+            .onChange(async (value) => {
+              this.plugin.settings.opencodeBinaryPath = value || 'opencode';
+              this.plugin.manager.updateSettings(this.plugin.settings);
+              await this.plugin.saveSettings();
+            }),
+        );
+    } else if (provider === 'antigravity') {
+      new Setting(panelEl)
+        .setName('Antigravity binary path')
+        .setDesc('Path to the agy executable (desktop only). Antigravity threads run a local "agy acp" per session and use the Google sign-in and model catalog of your Antigravity CLI: run agy once and sign in first.')
+        .addText((text) =>
+          text
+            .setPlaceholder('agy')
+            .setValue(this.plugin.settings.antigravityBinaryPath ?? 'agy')
+            .onChange(async (value) => {
+              this.plugin.settings.antigravityBinaryPath = value || 'agy';
+              this.plugin.manager.updateSettings(this.plugin.settings);
+              await this.plugin.saveSettings();
+            }),
+        );
+    }
+
+    // 2. Per-provider Default model + Refresh models action
+    const currentDefaultModel = resolveHarnessDefaultModel(this.plugin.settings, provider) ?? '';
+    const catalogCount = this.plugin.discoveredModelsByHarness?.[provider]?.length ?? 0;
+    const baseModelDesc: Record<AgentHarness, string> = {
+      claude:
+        'Default model for Claude Code turns unless a thread overrides it with /model. '
+        + '"CLI default" defers to the Claude Code CLI configuration. '
+        + 'Aliases always track the latest version; pinned IDs lock to a specific release.',
+      codex:
+        'Default model for OpenAI Codex threads unless overridden per thread. '
+        + '"CLI default" uses your local Codex configuration.',
+      opencode:
+        'Default model (provider/model) for OpenCode threads unless overridden per thread. '
+        + '"CLI default" uses your local OpenCode configuration.',
+      antigravity:
+        'Default model for Antigravity threads unless overridden per thread. '
+        + 'Antigravity model entries include reasoning effort tiers (e.g. Low, Medium, High).',
+    };
+    const emptyCatalogHint = provider !== 'claude' && catalogCount === 0
+      ? ' Click "Refresh models" or start a thread to load available models from your CLI.'
+      : '';
+
+    const defaultModelSetting = new Setting(panelEl)
+      .setName('Default model')
+      .setDesc(baseModelDesc[provider] + emptyCatalogHint)
+      .addDropdown((dropdown) => {
+        this.addModelOptionsForHarness(dropdown, provider, {
+          includeCliDefault: true,
+          currentValue: currentDefaultModel,
+        });
+        return dropdown
+          .setValue(currentDefaultModel)
+          .onChange(async (value) => {
+            setHarnessDefaultModel(this.plugin.settings, provider, value);
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          });
+      });
+
+    if (!Platform.isMobile) {
+      const isRefreshing = this.refreshingHarnessModels.has(provider);
+      const canRefresh = typeof (this.plugin as { refreshHarnessModels?: unknown }).refreshHarnessModels === 'function';
+      defaultModelSetting.addButton((btn) =>
+        btn
+          .setButtonText(isRefreshing ? 'Refreshing…' : 'Refresh models')
+          .setDisabled(isRefreshing || !canRefresh)
+          .onClick(async () => {
+            if (this.refreshingHarnessModels.has(provider)) return;
+            this.refreshingHarnessModels.add(provider);
+            this.harnessRefreshStatus.delete(provider);
+            this.display();
+            try {
+              const models = await this.plugin.refreshHarnessModels(provider);
+              this.harnessRefreshStatus.set(provider, {
+                text: models.length > 0
+                  ? `Loaded ${models.length} model${models.length === 1 ? '' : 's'} from ${PROVIDER_TAB_LABELS[provider]}.`
+                  : `No models reported by ${PROVIDER_TAB_LABELS[provider]}.`,
+                isError: models.length === 0,
+              });
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              this.harnessRefreshStatus.set(provider, { text: message, isError: true });
+            } finally {
+              this.refreshingHarnessModels.delete(provider);
+              this.display();
+            }
+          }),
+      );
+    }
+
+    const refreshStatus = this.harnessRefreshStatus.get(provider);
+    if (refreshStatus) {
+      defaultModelSetting.descEl.createDiv({
+        cls: `ct-model-refresh-status${refreshStatus.isError ? ' mod-warning' : ''}`,
+        text: refreshStatus.text,
+        attr: { role: 'status' },
+      });
+    }
+
+    // 3. Per-provider Default permission mode override
+    const globalPermMode = this.plugin.settings.permissionMode ?? 'acceptEdits';
+    const globalPermLabel = PERMISSION_MODE_LABELS[globalPermMode] ?? globalPermMode;
+    const currentPermOverride = resolveHarnessPermissionModeOverride(this.plugin.settings, provider) ?? '';
+    const permDesc =
+      'Overrides the global Permission mode (Settings → Tools) for threads on this provider unless a thread sets its own mode.'
+      + (provider === 'antigravity'
+        ? ' Bypass all permissions and Auto-approve launch agy with --dangerously-skip-permissions so background subagents do not stall on approvals.'
+        : '');
+
+    new Setting(panelEl)
+      .setName('Default permission mode')
+      .setDesc(permDesc)
+      .addDropdown((drop) =>
+        drop
+          .addOption('', `Use global default (${globalPermLabel})`)
+          .addOption('default', PERMISSION_MODE_LABELS.default)
+          .addOption('acceptEdits', PERMISSION_MODE_LABELS.acceptEdits)
+          .addOption('bypassPermissions', PERMISSION_MODE_LABELS.bypassPermissions)
+          .addOption('plan', PERMISSION_MODE_LABELS.plan)
+          .addOption('dontAsk', PERMISSION_MODE_LABELS.dontAsk)
+          .addOption('auto', PERMISSION_MODE_LABELS.auto)
+          .setValue(currentPermOverride)
+          .onChange(async (value) => {
+            setHarnessPermissionModeOverride(
+              this.plugin.settings,
+              provider,
+              (value || undefined) as PluginSettings['permissionMode'] | undefined,
+            );
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    // 4. Provider-specific native options
+    if (provider === 'claude') {
+      new Setting(panelEl)
+        .setName('Account / provider')
+        .setDesc(
+          'Claude account uses the CLI\'s own login. ' +
+          'Amazon Bedrock sets CLAUDE_CODE_USE_BEDROCK=1 — also add AWS_PROFILE and AWS_REGION under Extra environment variables.',
+        )
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('claude', 'Claude account (default)')
+            .addOption('bedrock', 'Amazon Bedrock')
+            .setValue(this.plugin.settings.provider ?? 'claude')
+            .onChange(async (value) => {
+              this.plugin.settings.provider = value as ProviderMode;
+              awsCredsSetting.settingEl.style.display = value === 'bedrock' && !Platform.isMobile ? '' : 'none';
               this.plugin.manager.updateSettings(this.plugin.settings);
               await this.plugin.saveSettings();
             }),
         );
 
-      new Setting(containerEl)
-        .setName('Escalation model')
-        .setDesc('Model the escalation keyword routes that turn to.')
-        .addDropdown((dropdown) => {
-          this.addModelOptions(dropdown);
-          return dropdown
-            .setValue(this.plugin.settings.escalationModel || 'opus')
+      // Bedrock-only: verify (and, if needed, refresh) AWS credentials without
+      // waiting for a turn to fail. Desktop only — reads the AWS config and SSO token cache directly.
+      const awsCredsSetting = new Setting(panelEl)
+        .setName('AWS credentials')
+        .setDesc('Checks the profile from Extra environment variables (AWS_PROFILE), falling back to the default profile.');
+      // style.display, not HTMLElement.toggle(): Geode's DOM shim has no toggle(), and the
+      // throw aborted display() so every setting below this row never rendered.
+      awsCredsSetting.settingEl.style.display = (this.plugin.settings.provider ?? 'claude') === 'bedrock' && !Platform.isMobile ? '' : 'none';
+      const awsStatus = awsCredsSetting.descEl.createDiv({ cls: 'ct-auth-status' });
+      const runAwsCheck = async (): Promise<void> => {
+        awsStatus.setText('Checking…');
+        awsStatus.removeClass('is-error');
+        const res = await checkAwsCredentialsNow(this.plugin.settings);
+        if (res.ok) awsStatus.setText(`Signed in — account ${res.account}`);
+        else {
+          awsStatus.addClass('is-error');
+          awsStatus.setText(res.expired ? 'Not signed in (SSO session expired or missing).' : res.error);
+        }
+      };
+      if (!Platform.isMobile) new Setting(panelEl)
+        .setName('AWS profiles for the local daemon')
+        .setDesc(
+          'One profile per line. Threads that run on the local daemon (Run on: This Mac (container)) get a trimmed AWS config '
+          + 'containing only these profiles, plus the AWS_PROFILE from Extra environment variables, and the SSO token of each '
+          + 'profile\'s session (only that session\'s token file). Copied before each message, so a fresh sign-in on this Mac '
+          + 'reaches the daemon. Amazon Bedrock threads always get their AWS_PROFILE. Leave empty to share nothing extra.',
+        )
+        .addTextArea((ta) =>
+          ta
+            .setPlaceholder('my-deploy-profile')
+            .setValue(this.plugin.settings.containerAwsProfiles ?? '')
             .onChange(async (value) => {
-              this.plugin.settings.escalationModel = value;
+              this.plugin.settings.containerAwsProfiles = value;
               this.plugin.manager.updateSettings(this.plugin.settings);
               await this.plugin.saveSettings();
-            });
-        });
+            }),
+        );
+
+      awsCredsSetting
+        .addButton((btn) => btn.setButtonText('Check').onClick(() => void runAwsCheck()))
+        .addButton((btn) =>
+          btn.setButtonText('Sign in').onClick(async () => {
+            btn.setDisabled(true);
+            try {
+              const profile = resolveSignInProfile(this.plugin.settings);
+              const res = await reauthenticateAws(this.plugin.settings, undefined, {
+                onProgress: (t) => awsStatus.setText(profile ? `${t} (profile ${profile})` : t),
+              });
+              if (res.ok) await runAwsCheck();
+              else {
+                awsStatus.addClass('is-error');
+                awsStatus.setText(res.error);
+              }
+            } finally {
+              btn.setDisabled(false);
+            }
+          }),
+        );
+
+      new Setting(panelEl)
+        .setName('Thinking mode')
+        .setDesc('Controls extended reasoning. "Adaptive" lets Claude decide; "Enabled" uses a fixed token budget; "Disabled" turns off extended thinking.')
+        .addDropdown((drop) =>
+          drop
+            .addOption('disabled', 'Disabled')
+            .addOption('adaptive', 'Adaptive (Claude decides)')
+            .addOption('enabled', 'Enabled (fixed token budget)')
+            .setValue(this.plugin.settings.thinkingMode ?? 'disabled')
+            .onChange(async (value) => {
+              this.plugin.settings.thinkingMode = value as PluginSettings['thinkingMode'];
+              await this.plugin.saveSettings();
+            }),
+        );
+
+      new Setting(panelEl)
+        .setName('Thinking token budget')
+        .setDesc('Maximum tokens for thinking when mode is "Enabled".')
+        .addText((text) =>
+          text
+            .setPlaceholder('8000')
+            .setValue(String(this.plugin.settings.thinkingBudgetTokens ?? 8000))
+            .onChange(async (value) => {
+              const n = parseInt(value, 10);
+              if (!isNaN(n) && n > 0) {
+                this.plugin.settings.thinkingBudgetTokens = n;
+                await this.plugin.saveSettings();
+              }
+            }),
+        );
+
+      new Setting(panelEl)
+        .setName('Effort level')
+        .setDesc('How much reasoning effort Claude applies. "Default" uses the CLI default.')
+        .addDropdown((drop) =>
+          drop
+            .addOption('default', 'Default')
+            .addOption('low', 'Low (fastest)')
+            .addOption('medium', 'Medium')
+            .addOption('high', 'High')
+            .addOption('xhigh', 'Extra high (Opus 4.7+)')
+            .addOption('max', 'Max (Opus 4.6+, Sonnet 4.6)')
+            .setValue(this.plugin.settings.effort ?? 'default')
+            .onChange(async (value) => {
+              this.plugin.settings.effort = value as PluginSettings['effort'];
+              this.plugin.manager.updateSettings(this.plugin.settings);
+              await this.plugin.saveSettings();
+            }),
+        );
+
+      new Setting(panelEl)
+        .setName('Agent progress summaries')
+        .setDesc('When enabled, running subagents emit an AI-generated progress summary every ~30 seconds.')
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.agentProgressSummaries ?? true)
+            .onChange(async (value) => {
+              this.plugin.settings.agentProgressSummaries = value;
+              await this.plugin.saveSettings();
+            }),
+        );
+
+      new Setting(panelEl)
+        .setName('Enable 1M context window (beta)')
+        .setDesc('Passes the context-1m-2025-08-07 beta header for Sonnet 4/4.5. Requires a model that supports it.')
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.enable1MContext ?? false)
+            .onChange(async (value) => {
+              this.plugin.settings.enable1MContext = value;
+              await this.plugin.saveSettings();
+            }),
+        );
+
+      // — Model escalation (Claude-specific) —
+      new Setting(panelEl).setName('Model escalation').setHeading();
+
+      new Setting(panelEl)
+        .setName('Enable model escalation')
+        .setDesc('When the keyword appears in a message, route that single turn to the escalation model. The keyword is stripped before sending.')
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.escalationEnabled).onChange(async (value) => {
+            this.plugin.settings.escalationEnabled = value;
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+            this.display();
+          }),
+        );
+
+      if (this.plugin.settings.escalationEnabled) {
+        new Setting(panelEl)
+          .setName('Escalation keyword')
+          .setDesc('Word or phrase that triggers escalation.')
+          .addText((text) =>
+            text
+              .setPlaceholder('/escalate')
+              .setValue(this.plugin.settings.escalationKeyword)
+              .onChange(async (value) => {
+                this.plugin.settings.escalationKeyword = value || '/escalate';
+                this.plugin.manager.updateSettings(this.plugin.settings);
+                await this.plugin.saveSettings();
+              }),
+          );
+
+        const currentEscalationModel = this.plugin.settings.escalationModel || 'opus';
+        new Setting(panelEl)
+          .setName('Escalation model')
+          .setDesc('Model the escalation keyword routes that turn to.')
+          .addDropdown((dropdown) => {
+            this.addModelOptionsForHarness(dropdown, 'claude', { currentValue: currentEscalationModel });
+            return dropdown
+              .setValue(currentEscalationModel)
+              .onChange(async (value) => {
+                this.plugin.settings.escalationModel = value;
+                this.plugin.manager.updateSettings(this.plugin.settings);
+                await this.plugin.saveSettings();
+              });
+          });
+      }
+    } else if (provider === 'codex') {
+      new Setting(panelEl)
+        .setName('Codex effort level')
+        .setDesc('How much reasoning effort Codex applies. Ultra enables proactive native agents on supported models; Default uses the model default.')
+        .addDropdown((drop) =>
+          drop
+            .addOption('default', 'Default')
+            .addOption('low', 'Low (fastest)')
+            .addOption('medium', 'Medium')
+            .addOption('high', 'High')
+            .addOption('xhigh', 'Extra high')
+            .addOption('max', 'Max')
+            .addOption('ultra', 'Ultra (proactive agents)')
+            .setValue(this.plugin.settings.codexEffort ?? 'default')
+            .onChange(async (value) => {
+              this.plugin.settings.codexEffort = value as PluginSettings['codexEffort'];
+              this.plugin.manager.updateSettings(this.plugin.settings);
+              await this.plugin.saveSettings();
+            }),
+        );
+
+      new Setting(panelEl)
+        .setName('Codex computer use')
+        .setDesc('Allow Codex computer-use capabilities from your local Codex configuration. Off by default; shared Codex browser tools may also be disabled. Changes apply when a Codex session next starts or restarts; existing sessions keep their current access. Use “Reload plugin (safe)” after active work finishes to apply to all sessions.')
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.codexComputerUseEnabled === true)
+            .onChange(async (value) => {
+              this.plugin.settings.codexComputerUseEnabled = value;
+              this.plugin.manager.updateSettings(this.plugin.settings);
+              await this.plugin.saveSettings();
+            }),
+        );
+
+      new Setting(panelEl)
+        .setName('Codex network access default')
+        .setDesc('Default network access for local Codex threads using “Use default”. Off by default. Explicit On or Off thread choices are preserved; Plan mode still denies network access and remote threads are unchanged. Changes apply when a local Codex session next starts or restarts; existing sessions keep their current access. Choose “Use default” in a thread to apply the current default immediately.')
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.codexNetworkAccessDefault === true)
+            .onChange(async (value) => {
+              this.plugin.settings.codexNetworkAccessDefault = value;
+              this.plugin.manager.updateSettings(this.plugin.settings);
+              await this.plugin.saveSettings();
+            }),
+        );
     }
   }
 
@@ -3396,7 +3630,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       const execution = describeScheduledExecution(
         item,
         this.plugin.settings.agentHarness ?? 'claude',
-        this.plugin.settings.defaultModel ?? '',
+        (harness) => resolveHarnessDefaultModel(this.plugin.settings, harness),
         targetThread,
       );
       const projectName = item.projectId ? (projectNames.get(item.projectId) ?? 'Unknown project') : 'No project';

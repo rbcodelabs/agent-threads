@@ -45,12 +45,16 @@ function modelLabel(model: string | undefined): string {
 export function describeScheduledExecution(
   item: ScheduledItem,
   globalHarness: AgentHarness,
-  globalModel: string,
+  globalModel: string | ((harness: AgentHarness) => string | undefined),
   targetThread?: Pick<Thread, 'agentHarness' | 'model'>,
 ): ScheduledExecutionDisplay {
+  const resolveModel = typeof globalModel === 'function'
+    ? (harness: AgentHarness) => globalModel(harness) || ''
+    : (harness: AgentHarness) => (harness === globalHarness || !targetThread ? globalModel : globalModel);
+  const globalDefaultModel = resolveModel(globalHarness);
   const globalHarnessName = harnessLabel(globalHarness);
-  const globalModelName = modelLabel(globalModel);
-  const globalModelPhrase = globalModel ? `${globalModelName} model` : 'the CLI default model';
+  const globalModelName = modelLabel(globalDefaultModel);
+  const globalModelPhrase = globalDefaultModel ? `${globalModelName} model` : 'the CLI default model';
 
   if (!item.targetThreadId) {
     return {
@@ -68,11 +72,13 @@ export function describeScheduledExecution(
     };
   }
 
-  const targetHarnessName = harnessLabel(targetThread.agentHarness ?? 'claude');
-  const targetModelName = modelLabel(targetThread.model ?? globalModel);
+  const targetHarness: AgentHarness = targetThread.agentHarness ?? 'claude';
+  const targetHarnessDefault = typeof globalModel === 'function' ? (globalModel(targetHarness) || '') : globalModel;
+  const targetHarnessName = harnessLabel(targetHarness);
+  const targetModelName = modelLabel(targetThread.model ?? targetHarnessDefault);
   const targetModelPhrase = targetThread.model
     ? `its persisted ${targetModelName} model`
-    : globalModel
+    : targetHarnessDefault
       ? `the current global ${targetModelName} model`
       : 'the CLI default model';
   return {

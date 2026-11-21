@@ -121,7 +121,7 @@ describe('toolRouting routes', () => {
       'browser_screenshot', 'browser_scroll', 'browser_snapshot', 'browser_status', 'browser_type',
       'list_watched_documents',
       'skills_get', 'skills_list_installed', 'skills_list_sources', 'skills_search',
-      'threads_get_current', 'threads_get_log', 'threads_get_messages', 'threads_list', 'threads_list_projects', 'threads_wait',
+      'threads_get', 'threads_get_current', 'threads_get_ledger', 'threads_get_log', 'threads_get_messages', 'threads_list', 'threads_list_projects', 'threads_wait',
       'vault_get_backlinks', 'vault_get_file_history', 'vault_get_note_metadata', 'vault_get_outgoing_links', 'vault_list', 'vault_list_bridges', 'vault_search',
       'sync_inspect_conflict', 'sync_list_conflicts',
       'workspace_get_active_file', 'workspace_get_open_tabs',
@@ -132,7 +132,7 @@ describe('toolRouting routes', () => {
     const dangerous = ['request_secret', 'mcp_register_server', 'host_execute_command', 'obsidian_execute_command', 'host_list_commands',
       'host_open_url', 'workspace_navigate_to_file', 'workspace_insert_at_cursor', 'watch_document', 'unwatch_document',
       'vault_restore_file_version', 'vault_add_bridge', 'vault_move', 'sync_resolve_conflict', 'threads_create', 'threads_create_project', 'threads_update_project',
-      'threads_set_project', 'threads_open', 'threads_send_message', 'threads_archive', 'threads_set_notes',
+      'threads_set_project', 'threads_open', 'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_ledger',
       'threads_set_proposed_reply', 'threads_clear_proposed_reply', 'threads_post_decision', 'threads_clear_decision', 'threads_list_orchestrators', 'threads_set_orchestrator_enabled', 'skills_install', 'skills_create_local', 'skills_update_local',
       'skills_uninstall', 'skills_update', 'skills_check_updates', 'ScheduleWakeup', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',
       'browser_eval', 'browser_save_page'];
