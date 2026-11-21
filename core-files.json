@@ -60,6 +60,7 @@
     "src/orchestratorThreads.ts",
     "src/pathUtils.ts",
     "src/planText.ts",
+    "src/processTree.ts",
     "src/productIdentity.ts",
     "src/projectOverview.ts",
     "src/protocol/codec.ts",
