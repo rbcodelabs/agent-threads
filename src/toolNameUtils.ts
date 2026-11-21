@@ -175,12 +175,12 @@ const CANONICAL_BUILT_IN_TOOLS = new Set([
   'sync_list_conflicts', 'sync_inspect_conflict', 'agent_threads_help',
   'workspace_get_active_file', 'workspace_get_open_tabs', 'workspace_navigate_to_file',
   'workspace_insert_at_cursor', 'host_list_commands', 'host_execute_command', 'host_open_url',
-  'threads_get_current', 'threads_list', 'threads_create', 'threads_list_projects', 'threads_create_project', 'threads_update_project',
+  'threads_get_current', 'threads_get', 'threads_list', 'threads_create', 'threads_list_projects', 'threads_create_project', 'threads_update_project',
   'threads_set_project', 'threads_get_messages', 'threads_get_log', 'threads_wait',
   'threads_open',
   'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_proposed_reply',
   'threads_clear_proposed_reply', 'threads_post_decision', 'threads_clear_decision',
-  'threads_list_orchestrators', 'threads_set_orchestrator_enabled',
+  'threads_list_orchestrators', 'threads_set_orchestrator_enabled', 'threads_get_ledger', 'threads_set_ledger',
   // Agent browser. Canonical-only: these are new tools, so they were never
   // exposed under the legacy obsidian_ names and need no compatibility alias.
   'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',

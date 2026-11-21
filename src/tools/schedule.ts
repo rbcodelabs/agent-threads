@@ -11,7 +11,7 @@ import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 type ToolDef = SdkMcpToolDefinition<any>;
 
 export interface ScheduleToolsPort {
-  options: Pick<ObsidianMcpServerOptions, 'onCronCreate' | 'onCronDelete' | 'onCronList' | 'onCronUpdate' | 'onScheduleWakeup'>;
+  options: Pick<ObsidianMcpServerOptions, 'isOrchestratorThread' | 'onCronCreate' | 'onCronDelete' | 'onCronList' | 'onCronUpdate' | 'onScheduleWakeup' | 'threadId'>;
 }
 
 
@@ -32,6 +32,17 @@ export function createScheduleTools(port: ScheduleToolsPort): Record<string, Too
     },
     async (args, _extra) => {
       try {
+        if (options.threadId && options.isOrchestratorThread?.(options.threadId)) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: 'Error: Orchestrator threads cannot use ScheduleWakeup to poll; WakeupService and HeartbeatService wake orchestrators automatically when worker threads finish or fail.',
+              },
+            ],
+            isError: true,
+          };
+        }
         await options.onScheduleWakeup?.(args.delaySeconds * 1000, args.prompt, args.reason);
         return {
           content: [

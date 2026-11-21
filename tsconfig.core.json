@@ -58,6 +58,8 @@
     "src/mcpServerStore.ts",
     "src/mcpStatus.ts",
     "src/modelOptions.ts",
+    "src/orchestratorCharter.ts",
+    "src/orchestratorThreads.ts",
     "src/pathUtils.ts",
     "src/planText.ts",
     "src/productIdentity.ts",

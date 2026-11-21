@@ -116,13 +116,14 @@ import { createRemoteFolderSource, type RemoteFolderSource } from './remote/fold
 import { createRemoteReposSource, type RemoteReposSource } from './remote/repos';
 import { RemoteSkillsSync, resolveSkillsSyncMode } from './remote/skillsSync';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
-import { setKnownSecretsProvider } from './secretRedaction';
+import { redactForStorage, setKnownSecretsProvider } from './secretRedaction';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
 import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProject } from './secretUtils';
 import { scheduleVaultThreadRecovery } from './vaultThreadRecovery';
 import { resolveProjectVaultRoot } from './projectPaths';
 import { stripLegacyOrchestratorHeartbeats } from './legacyHeartbeats';
 import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, canWriteManagerNotes, repairStaleProjectOrchestrators, resolveCoordinationRole } from './coordinationScope';
+import { resolveOrchestratorLedgerPath } from './orchestratorCharter';
 import {
   sharedPersistenceWriterFence,
   type PersistenceWriterToken,
@@ -908,8 +909,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
             const caller = this.manager.getThread(threadId);
             const target = this.manager.getThread(targetId);
             if (!caller || !target) return false;
-            const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, this.manager.getProjects());
-            if (operation === 'notes') return canWriteManagerNotes(role, target.projectId);
+            const projects = this.manager.getProjects();
+            const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, projects);
+            if (operation === 'notes') return canWriteManagerNotes(role, target.projectId, elevatedProjectId, projects);
             return authorizeThreadAccess(role, target.projectId, elevatedProjectId);
           },
           authorizeProjectDestination: (projectId, elevatedProjectId, targetThreadId) => {
@@ -938,6 +940,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
               lastError: t.lastError,
               reviewed: t.reviewed,
               projectId: t.projectId,
+              ...(t.goal ? { goal: t.goal } : {}),
               cwd: t.cwd,
               originRepoPath: t.originRepoPath,
               projectNameOverride: t.projectNameOverride,
@@ -1044,6 +1047,79 @@ export default class ClaudeThreadsPlugin extends Plugin {
             }
             this.manager.notifyManagerNotesChanged(id);
             this.saveSettings().catch(console.error);
+          },
+          getOrchestratorLedger: async (params) => {
+            const caller = this.manager.getThread(threadId);
+            if (!caller) throw new Error('Target is outside coordination scope.');
+            const targetProjectId = params.projectId === null
+              ? undefined
+              : params.projectId !== undefined
+                ? params.projectId.trim()
+                : caller.projectId;
+            if (params.projectId !== undefined && params.projectId !== null && !targetProjectId) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const projects = this.manager.getProjects();
+            const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, projects);
+            if (!authorizeThreadAccess(role, targetProjectId, params.elevatedProjectId)) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const project = targetProjectId !== undefined ? this.manager.getProject(targetProjectId) : undefined;
+            if (targetProjectId !== undefined && !project) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const ledgerPath = normalizePath(resolveOrchestratorLedgerPath(project ? project.name : null));
+            const existing = this.app.vault.getAbstractFileByPath(ledgerPath);
+            if (!(existing instanceof TFile)) {
+              return { path: ledgerPath, exists: false, content: '' };
+            }
+            const content = await this.app.vault.read(existing);
+            return { path: ledgerPath, exists: true, content };
+          },
+          setOrchestratorLedger: async (params) => {
+            const caller = this.manager.getThread(threadId);
+            if (!caller) throw new Error('Target is outside coordination scope.');
+            const targetProjectId = params.projectId === null
+              ? undefined
+              : params.projectId !== undefined
+                ? params.projectId.trim()
+                : caller.projectId;
+            if (params.projectId !== undefined && params.projectId !== null && !targetProjectId) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const projects = this.manager.getProjects();
+            const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, projects);
+            if (!canWriteManagerNotes(role, targetProjectId, params.elevatedProjectId, projects)) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const project = targetProjectId !== undefined ? this.manager.getProject(targetProjectId) : undefined;
+            if (targetProjectId !== undefined && !project) {
+              throw new Error('Target is outside coordination scope.');
+            }
+            const ledgerPath = normalizePath(resolveOrchestratorLedgerPath(project ? project.name : null));
+            const redacted = redactForStorage(params.content);
+            const existing = this.app.vault.getAbstractFileByPath(ledgerPath);
+            if (existing && !(existing instanceof TFile)) {
+              throw new Error(`Ledger path is occupied by a folder: ${ledgerPath}`);
+            }
+            if (existing instanceof TFile) {
+              await this.app.vault.modify(existing, redacted);
+            } else if (redacted.length > 0) {
+              const parts = ledgerPath.split('/').slice(0, -1);
+              let currentDir = '';
+              for (const part of parts) {
+                currentDir = currentDir ? `${currentDir}/${part}` : part;
+                if (!this.app.vault.getAbstractFileByPath(currentDir)) {
+                  try {
+                    await this.app.vault.createFolder(currentDir);
+                  } catch {
+                    // Folder may have been created concurrently.
+                  }
+                }
+              }
+              await this.app.vault.create(ledgerPath, redacted);
+            }
+            return { path: ledgerPath, bytes: new TextEncoder().encode(redacted).length };
           },
           setThreadProposedReply: (id: string, text: string) => {
             const thread = this.manager.getThread(id);
@@ -2094,6 +2170,49 @@ export default class ClaudeThreadsPlugin extends Plugin {
       name: 'Open Portfolio Orchestrator',
       callback: async () => {
         await this.ensureOrchestratorThread();
+      },
+    });
+
+    this.addCommand({
+      id: 'reset-orchestrator-session',
+      name: 'Reset orchestrator session (fresh context)',
+      callback: async () => {
+        if (!this.manager) {
+          new Notice('No active orchestrator thread found to reset.');
+          return;
+        }
+        const activeId = this.getView()?.getActiveThreadId?.();
+        const projects = this.manager.getProjects();
+        const isOrch = (id: string | null | undefined): id is string =>
+          !!id
+          && !!this.manager.getThread(id)
+          && (id === this.settings.orchestratorThreadId || projects.some(p => p.orchestratorThreadId === id));
+        const activeThread = activeId ? this.manager.getThread(activeId) : undefined;
+        const activeProjectOrchId = activeThread?.projectId
+          ? this.manager.getProject(activeThread.projectId)?.orchestratorThreadId
+          : undefined;
+        const targetId = isOrch(activeId)
+          ? activeId
+          : isOrch(activeProjectOrchId)
+            ? activeProjectOrchId
+            : isOrch(this.settings.orchestratorThreadId)
+              ? this.settings.orchestratorThreadId
+              : undefined;
+        const target = targetId ? this.manager.getThread(targetId) : undefined;
+        if (!targetId || !target) {
+          new Notice('No active orchestrator thread found to reset.');
+          return;
+        }
+        if (this.manager.isRunning(targetId)) {
+          new Notice(`"${target.title}" is currently running — interrupt it before resetting its session.`);
+          return;
+        }
+        if (!this.manager.resetThreadSession(targetId)) {
+          new Notice('No active orchestrator thread found to reset.');
+          return;
+        }
+        await this.saveSettings();
+        new Notice(`Reset "${target.title}" — next turn starts with a fresh context window.`);
       },
     });
 
