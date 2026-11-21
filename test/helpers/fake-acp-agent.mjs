@@ -138,6 +138,109 @@ async function runPrompt(sessionId, text) {
     }
     update(sessionId, { sessionUpdate: 'tool_call_update', ...subTool, status: 'completed' });
     update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Waiting on Auth Researcher.' } });
+    if (text.includes('OUT_OF_TURN_1511') && process.env.FAKE_ACP_BRAIN_DIR) {
+      const brainDir = process.env.FAKE_ACP_BRAIN_DIR;
+      const slowCmdMs = Number(process.env.FAKE_ACP_OOT_CMD_MS ?? 120);
+      const lateChunkMs = Number(process.env.FAKE_ACP_OOT_LATE_FINAL_CHUNK_MS ?? 0);
+      const omitFinalChunk = process.env.FAKE_ACP_OOT_OMIT_FINAL_CHUNK === '1';
+      setTimeout(async () => {
+        appendBrainSteps(brainDir, 'child-sub-1', [
+          { step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'PR checks green.' },
+        ]);
+        appendBrainSteps(brainDir, sessionId, [
+          { step_index: 4, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=child-sub-1\nPR checks green.' },
+        ]);
+        update(sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'Merging verified PR after child report.' } });
+        update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '  CI is green — merging PR now.' } });
+        const ootCall = {
+          toolCallId: 'call_oot_merge_1',
+          name: 'run_command',
+          kind: 'execute',
+          title: 'Merge PR',
+          rawInput: { CommandLine: 'gh pr merge 952 --squash' },
+        };
+        update(sessionId, { sessionUpdate: 'tool_call', ...ootCall, status: 'in_progress' });
+        appendBrainSteps(brainDir, sessionId, [
+          {
+            step_index: 5,
+            source: 'MODEL',
+            type: 'PLANNER_RESPONSE',
+            status: 'DONE',
+            content: 'CI is green — merging PR now.',
+            tool_calls: [{ name: 'run_command', args: ootCall.rawInput }],
+          },
+        ]);
+        update(sessionId, { sessionUpdate: 'tool_call_update', ...ootCall, status: 'pending' });
+        const reply = await requestPermission({ sessionUpdate: 'tool_call', ...ootCall });
+        if (cancelledDuringPrompt || reply?.outcome?.outcome !== 'selected' || reply?.outcome?.optionId !== 'allow') {
+          update(sessionId, { sessionUpdate: 'tool_call_update', ...ootCall, status: 'failed' });
+          return;
+        }
+        update(sessionId, { sessionUpdate: 'tool_call_update', ...ootCall, status: 'in_progress' });
+        await sleep(slowCmdMs);
+        if (cancelledDuringPrompt) return;
+        update(sessionId, { sessionUpdate: 'tool_call_update', ...ootCall, status: 'completed' });
+        appendBrainSteps(brainDir, sessionId, [
+          { step_index: 6, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'Merged PR #952.' },
+        ]);
+        if (lateChunkMs > 0) {
+          appendBrainSteps(brainDir, sessionId, [
+            { step_index: 7, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Release shipped cleanly!' },
+          ]);
+          if (!omitFinalChunk) {
+            await sleep(lateChunkMs);
+            update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '  Release shipped cleanly!' } });
+          }
+        } else {
+          if (!omitFinalChunk) {
+            update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '  Release shipped cleanly!' } });
+          }
+          appendBrainSteps(brainDir, sessionId, [
+            { step_index: 7, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Release shipped cleanly!' },
+          ]);
+        }
+      }, 25);
+    }
+    return stream.find((m) => m.result?.stopReason).result;
+  }
+  if (text.includes('SPONTANEOUS_DAEMON_1511') && process.env.FAKE_ACP_BRAIN_DIR) {
+    const brainDir = process.env.FAKE_ACP_BRAIN_DIR;
+    appendBrainSteps(brainDir, sessionId, [
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: text },
+      { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Daemon schedule armed.' },
+    ]);
+    update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Daemon schedule armed.' } });
+    const delayMs = Number(process.env.FAKE_ACP_SPONTANEOUS_DELAY_MS ?? 50);
+    setTimeout(() => {
+      appendBrainSteps(brainDir, sessionId, [
+        { step_index: 2, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=daemon-cron-1\nCron fired.' },
+      ]);
+      const cronTool = {
+        toolCallId: 'call_daemon_check_1',
+        name: 'read_file',
+        kind: 'read',
+        title: 'Read status',
+        rawInput: { Path: '/repo/STATUS.md' },
+      };
+      update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '  Checking scheduled CI status.' } });
+      update(sessionId, { sessionUpdate: 'tool_call', ...cronTool, status: 'in_progress' });
+      update(sessionId, { sessionUpdate: 'tool_call_update', ...cronTool, status: 'completed' });
+      appendBrainSteps(brainDir, sessionId, [
+        {
+          step_index: 3,
+          source: 'MODEL',
+          type: 'PLANNER_RESPONSE',
+          status: 'DONE',
+          content: 'Checking scheduled CI status.',
+          tool_calls: [{ name: 'read_file', args: cronTool.rawInput }],
+        },
+        { step_index: 4, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'CI: green' },
+      ]);
+      update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '  Scheduled check passed.' } });
+      appendBrainSteps(brainDir, sessionId, [
+        { step_index: 5, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Scheduled check passed.' },
+      ]);
+    }, delayMs);
     return stream.find((m) => m.result?.stopReason).result;
   }
   if (text.includes('CRASH')) {
@@ -232,11 +335,16 @@ async function handle(message) {
   const { id, method, params } = message;
   const ok = (result) => write({ jsonrpc: '2.0', id, result });
   switch (method) {
-    case 'initialize':
+    case 'initialize': {
       supportsFormElicitation = Boolean(params?.clientCapabilities?.elicitation?.form);
       await sleep(Number(process.env.FAKE_ACP_START_DELAY_MS ?? 0));
-      ok(initializeResponse);
+      const customVer = process.env.FAKE_ACP_SERVER_VERSION;
+      const initResult = customVer
+        ? { ...initializeResponse, agentInfo: { ...(initializeResponse.agentInfo ?? {}), version: customVer } }
+        : initializeResponse;
+      ok(initResult);
       return;
+    }
     case 'session/new': {
       currentSession = `fake-session-${++counter}`;
       ok(withSession(sessionNewResponse, currentSession));
@@ -266,6 +374,17 @@ async function handle(message) {
     case 'session/prompt': {
       cancelledDuringPrompt = false;
       const text = (params.prompt ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('\n');
+      if (text.includes('PROMPT_RPC_ERROR_WITH_TOOL')) {
+        update(String(params.sessionId), {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'rpc-err-tool-1',
+          name: 'read_file',
+          kind: 'read',
+          status: 'in_progress',
+        });
+        write({ jsonrpc: '2.0', id, error: { code: -32000, message: 'transient model error' } });
+        return;
+      }
       const result = await runPrompt(String(params.sessionId), text);
       ok(result);
       return;

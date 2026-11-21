@@ -2,23 +2,24 @@
  * Antigravity harness adapter (Google's Antigravity CLI, `agy acp`).
  *
  * Each session launches its own `agy acp` child and drives it over the Agent Client Protocol (see AcpClient):
- * NDJSON JSON-RPC on stdio, protocol version 1. Verified against the real CLI 1.1.13 (ACP server 1.5.8 / 1.5.9); frames
- * recorded from it live in test/fixtures/antigravity and drive the fake agent the unit tests use.
+ * NDJSON JSON-RPC on stdio, protocol version 1. Verified against the real CLI 1.1.13–1.5.11 (ACP server 1.5.8–1.5.11);
+ * frames recorded from it live in test/fixtures/antigravity and drive the fake agent the unit tests use.
  *
  * What the recording and binary inspection showed, and what this adapter does about it:
  * - Model catalog is dynamic (it differs between `agy models` and `session/new`): the menu comes from `session/new`,
  *   never a hard-coded list.
  * - Edits arrive as `tool_call` with `kind: edit` and `content: [{type: 'diff', path, oldText?, newText}]`. A
  *   permission request carries the same diff, so the approval card can show it before anything is written.
- * - Permissions are `session/request_permission` with `allow_once` / `reject_once` only, and `agy acp` 1.5.8/1.5.9
- *   forwards permission prompts ONLY for the parent session's active `session/prompt` turn — never for child subagents.
+ * - Permissions are `session/request_permission` with `allow_once` / `reject_once` only. On `agy acp` 1.5.8/1.5.9
+ *   permission prompts are forwarded ONLY for the parent session's active `session/prompt` turn; `1.5.11+` also forwards
+ *   parent out-of-turn wakeup prompts (`outOfTurnCallbacks`), while child subagents still never forward over ACP.
  *   In `bypassPermissions` mode (when no edit/shell denylist applies), the adapter launches `agy acp
  *   --dangerously-skip-permissions` (respawning and resuming via `session/load` when toggled mid-session) so both parent
  *   and child subagents run unattended without 60s approval timeouts.
- * - Subagent progress and reactive wakeups: `agy acp` omits child `conversationId`s and closes the ACP turn stream as
- *   soon as `session/prompt` returns, before background subagents finish and wake the parent up. When `<brainDir>/<id>`
- *   is present on disk, the adapter tails the parent and child JSONL transcripts to emit `onTaskStarted`,
- *   `onTaskProgress`, `onTaskUpdated`, `onTaskNotification`, and post-ACP wakeup messages before closing the turn.
+ * - Subagent progress and reactive wakeups: `agy acp` omits child `conversationId`s and resolves `session/prompt` before
+ *   background subagents finish and wake the parent up. On `1.5.11+` (`sendOutOfTurnStepUpdates`), parent wakeup steps
+ *   stream live over ACP while `transcript_full.jsonl` supplies subagent/background-task metadata and turn-completion
+ *   boundaries; on `1.5.8`/`1.5.9`, `transcript_full.jsonl` drives both metadata and post-ACP wakeup text/tool cards.
  * - Structured agent questions (`ask_question`): `initialize` advertises `clientCapabilities.elicitation.form` so `agy acp`
  *   takes `askQuestionWithForm` (`elicitation/create` with `<key>` + `<key>_other` JSON-schema properties) instead of
  *   dumping numbered `[1]`/`[2]` bullets into chat (`askQuestionInChat`). The adapter pairs those fields into native
@@ -70,13 +71,15 @@ import {
 export type { AntigravityBrainOptions } from './antigravityBrain';
 
 /** The ACP server release this adapter was verified against (`agentInfo.version` of `agy acp`). */
-export const ANTIGRAVITY_VERIFIED_VERSION = '1.5.8';
+export const ANTIGRAVITY_VERIFIED_VERSION = '1.5.11';
 const HARNESS: AgentHarness = 'antigravity';
 const ACP_PROTOCOL_VERSION = 1;
 const DEFAULT_BRAIN_POLL_MS = 250;
 const DEFAULT_WAKEUP_GRACE_MS = 2500;
 const DEFAULT_WAKEUP_TOOL_STALL_MS = 2500;
 const DEFAULT_WAKEUP_CANCEL_SETTLE_MS = 150;
+const DEFAULT_OUT_OF_TURN_TEXT_DRAIN_MS = 150;
+const DEFAULT_OUT_OF_TURN_NO_BRAIN_IDLE_MS = 300;
 const INTERNAL_ORCHESTRATION_TOOLS = new Set([
   'invoke_subagent',
   'define_subagent',
@@ -151,6 +154,23 @@ export function antigravityCliArgs(mode: HarnessPermissionMode, disallowedTools?
   return antigravityShouldSkipPermissions(mode, disallowedTools)
     ? ['acp', '--dangerously-skip-permissions']
     : ['acp'];
+}
+
+/**
+ * Whether `agentInfo.version` natively streams out-of-turn reactive wakeups over ACP (`sendOutOfTurnStepUpdates` /
+ * `outOfTurnCallbacks`, introduced in `agy acp` 1.5.11). Older servers (1.5.8 / 1.5.9) run post-ACP wakeups silently on
+ * disk and require `syncParentPostAcp` to synthesize text/tool updates and recover stalled permission prompts.
+ */
+export function antigravitySupportsOutOfTurnAcp(version: string | undefined): boolean {
+  if (typeof version !== 'string') return false;
+  const match = version.trim().match(/^v?(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3]);
+  if (major !== 1) return major > 1;
+  if (minor !== 5) return minor > 5;
+  return patch >= 11;
 }
 
 /** Antigravity tool names/kinds mapped to the plugin's display names (drives tool icons in `toolNameUtils.ts`). */
@@ -609,7 +629,8 @@ export class AntigravitySession {
   private lastEmittedThoughtSummary = '';
   /** Tool calls made since the last finished message; they ride with the text that precedes them, as Claude's do. */
   private pendingTools: ToolCallRecord[] = [];
-  private queuedTurns: Array<{ text: string; images?: ImageAttachment[] }> = [];
+  private queuedTurns: Array<{ text: string; images?: ImageAttachment[]; userMessageUuid?: string }> = [];
+  private activeUserMessageUuid: string | undefined;
   private resumeFallbackPending = false;
   private systemPromptPending = false;
   private loading = false;
@@ -640,12 +661,22 @@ export class AntigravitySession {
   private subagents = new Map<string, TrackedSubagent>();
   private activeBgTaskIds = new Set<string>();
   private pendingWakeups = 0;
-  private wakeupDeadlineMs = 0;
+  private wakeupGraceDeadlineMs = 0;
+  private wakeupErrorDeadlineMs = 0;
   private parentWakeupInFlight = false;
   private wakeupPendingTools: Array<{ callId: string; tool: AcpToolCall; startedAt: number }> = [];
   private bridgeCallsInFlight = 0;
   private wakeupToolStallDeadlineMs = 0;
   private promotingWakeup = false;
+  private outOfTurnAcpSupported = false;
+  private sawOutOfTurnPostToolText = false;
+  private pendingOutOfTurnFinalTexts: string[] = [];
+  private outOfTurnFinalTextDeadlineMs = 0;
+  private outOfTurnToolDrainDeadlineMs = 0;
+  private outOfTurnNoBrainIdleDeadlineMs = 0;
+  private unconfirmedOutOfTurnWakeup = false;
+  private unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+  private outOfTurnDrainTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * `launcher` replaces process spawning (tests); `startTimeoutMs` bounds the handshake and session setup, which on a
@@ -690,6 +721,7 @@ export class AntigravitySession {
     this.restartingClient = null;
     this.replayedHistory = 0;
     this.bridgeCallsInFlight = 0;
+    this.outOfTurnAcpSupported = false;
     this.subagents.clear();
     this.activeBgTaskIds.clear();
 
@@ -794,6 +826,7 @@ export class AntigravitySession {
       },
     }, client.startTimeoutMs);
     options.callbacks.onRawEvent?.({ type: 'antigravity/initialize', agentInfo: init?.agentInfo, protocolVersion: init?.protocolVersion });
+    this.outOfTurnAcpSupported = antigravitySupportsOutOfTurnAcp(init?.agentInfo?.version);
     const canLoad = Boolean(init?.agentCapabilities?.loadSession ?? init?.agentCapabilities?.load_session);
     const expectHistory = phase === 'initial' ? Boolean(resumeSessionId) : (this.turns > 0 || Boolean(options.resume && !this.resumeFallbackPending));
     let setup: any;
@@ -812,6 +845,10 @@ export class AntigravitySession {
     const sessionId = typeof setup?.sessionId === 'string' ? setup.sessionId : undefined;
     if (!sessionId) throw new Error(`Antigravity did not return a session id.${this.compatibilityHint()}`);
     this.sessionId = sessionId;
+    if (this.brainReader && this.brainReader.getLastStepIndex(sessionId) < 0) {
+      const existingMax = this.brainReader.peekMaxStepIndex(sessionId);
+      if (existingMax >= 0) this.brainReader.setBaselineStepIndex(sessionId, existingMax);
+    }
     this.currentMode = setup?.modes?.currentModeId;
     if (phase === 'initial') {
       if (!this.activeModel) this.activeModel = String(setup?.models?.currentModelId ?? '');
@@ -947,33 +984,33 @@ export class AntigravitySession {
       if (this.restartingClient === run) this.restartingClient = null;
       if (!this.closed && !this._turnInFlight && this.queuedTurns.length > 0) {
         const next = this.queuedTurns.shift()!;
-        this.startTurn(next.text, next.images);
+        this.startTurn(next.text, next.images, next.userMessageUuid);
       }
     }
   }
 
-  send(text: string, images?: ImageAttachment[], _userMessageUuid?: string): void {
+  send(text: string, images?: ImageAttachment[], userMessageUuid?: string): void {
     if (this.closed || (!this.restartingClient && (!this.sessionId || !this.client))) {
       throw new Error('Antigravity session is not running');
     }
     if (this._turnInFlight || this.restartingClient) {
-      this.queuedTurns.push({ text, images });
+      this.queuedTurns.push({ text, images, userMessageUuid });
       return;
     }
     const wantedSkip = this.options
       ? antigravityShouldSkipPermissions(this.options.permissionMode ?? 'default', this.options.disallowedTools)
       : this.spawnedWithSkipPermissions;
     if (this.restartForPermissionFlagPending || wantedSkip !== this.spawnedWithSkipPermissions) {
-      this.queuedTurns.push({ text, images });
+      this.queuedTurns.push({ text, images, userMessageUuid });
       void this.ensurePermissionFlagSynced().catch((error) => {
         if (!this.closed) this.options?.callbacks.onError(error instanceof Error ? error : new Error(String(error)));
       });
       return;
     }
-    this.startTurn(text, images);
+    this.startTurn(text, images, userMessageUuid);
   }
 
-  private startTurn(text: string, images?: ImageAttachment[]): void {
+  private startTurn(text: string, images?: ImageAttachment[], userMessageUuid?: string): void {
     const options = this.options;
     const client = this.client;
     const sessionId = this.sessionId;
@@ -981,6 +1018,7 @@ export class AntigravitySession {
     this._turnInFlight = true;
     this.acpPromptInFlight = true;
     this.acpTurnBrainEnded = false;
+    this.activeUserMessageUuid = userMessageUuid;
     // Snapshot the brain transcript's pre-turn step index on the session's first turn so prior history is never replayed;
     // on subsequent turns, flush any late post-ACP wakeups or subagent steps that landed while idle between turns.
     if (this.brainReader) {
@@ -989,8 +1027,9 @@ export class AntigravitySession {
         if (existingMax >= 0) this.brainReader.setBaselineStepIndex(sessionId, existingMax);
       } else {
         this.syncSubagentTranscripts(options.callbacks);
-        this.syncParentPostAcp(options.callbacks);
+        this.syncParentPostAcp(options.callbacks, true);
         this.syncSubagentTranscripts(options.callbacks);
+        if (this.wakeupPendingTools.length > 0) this.settleWakeupTools(options.callbacks, 'success');
         this.flushText(options.callbacks);
       }
     }
@@ -1001,9 +1040,18 @@ export class AntigravitySession {
     this.parentPendingSpawns = [];
     this.parentPendingToolCalls = [];
     this.parentWakeupInFlight = false;
+    this.wakeupErrorDeadlineMs = 0;
     this.wakeupPendingTools = [];
     this.wakeupToolStallDeadlineMs = 0;
     this.promotingWakeup = false;
+    this.sawOutOfTurnPostToolText = false;
+    this.pendingOutOfTurnFinalTexts = [];
+    this.outOfTurnFinalTextDeadlineMs = 0;
+    this.outOfTurnToolDrainDeadlineMs = 0;
+    this.outOfTurnNoBrainIdleDeadlineMs = 0;
+    this.unconfirmedOutOfTurnWakeup = false;
+    this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+    this.clearOutOfTurnDrainTimer();
     const mode = options.permissionMode ?? 'default';
 
     if (this.brainReader) {
@@ -1032,6 +1080,10 @@ export class AntigravitySession {
       .then((result) => this.finishTurn(result))
       .catch((error) => {
         if (this.closed || !this._turnInFlight) return;
+        for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
+        this.pendingPermissions.clear();
+        this.settleUnfinishedAnnouncedTools(options.callbacks);
+        this.settleWakeupToolsAsError(options.callbacks);
         this.abortBackgroundWork(options.callbacks, 'Failed');
         this.cancelPendingElicitations();
         this.resetTurnState();
@@ -1044,6 +1096,7 @@ export class AntigravitySession {
     this.queuedTurns = [];
     // A pending approval or question would otherwise keep the agent waiting on us: answer it as cancelled first.
     for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
+    this.pendingPermissions.clear();
     this.cancelPendingElicitations();
     this.client.notify('session/cancel', { sessionId: this.sessionId });
     // When `session/prompt` already ended and we are holding the turn open for background subagents/wakeups, there is
@@ -1052,6 +1105,7 @@ export class AntigravitySession {
       const callbacks = this.options?.callbacks;
       const sessionId = this.sessionId;
       if (callbacks) {
+        this.settleUnfinishedAnnouncedTools(callbacks);
         this.settleWakeupToolsAsError(callbacks);
         this.abortBackgroundWork(callbacks, 'Interrupted');
       }
@@ -1088,6 +1142,7 @@ export class AntigravitySession {
     this._turnInFlight = false;
     this.acpPromptInFlight = false;
     this.acpTurnBrainEnded = false;
+    this.activeUserMessageUuid = undefined;
     this.turnText = '';
     this.turnThought = '';
     this.lastEmittedThoughtSummary = '';
@@ -1096,12 +1151,161 @@ export class AntigravitySession {
     this.parentPendingSpawns = [];
     this.parentPendingToolCalls = [];
     this.pendingWakeups = 0;
-    this.wakeupDeadlineMs = 0;
+    this.wakeupGraceDeadlineMs = 0;
+    this.wakeupErrorDeadlineMs = 0;
     this.parentWakeupInFlight = false;
     this.wakeupPendingTools = [];
     this.wakeupToolStallDeadlineMs = 0;
     this.promotingWakeup = false;
+    this.sawOutOfTurnPostToolText = false;
+    this.pendingOutOfTurnFinalTexts = [];
+    this.outOfTurnFinalTextDeadlineMs = 0;
+    this.outOfTurnToolDrainDeadlineMs = 0;
+    this.outOfTurnNoBrainIdleDeadlineMs = 0;
+    this.unconfirmedOutOfTurnWakeup = false;
+    this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+    this.clearOutOfTurnDrainTimer();
     this.brainReader?.stopWatching();
+  }
+
+  private clearOutOfTurnDrainTimer(): void {
+    if (this.outOfTurnDrainTimer) {
+      clearTimeout(this.outOfTurnDrainTimer);
+      this.outOfTurnDrainTimer = null;
+    }
+  }
+
+  private syncOutOfTurnTimer(): void {
+    this.clearOutOfTurnDrainTimer();
+    if (!this._turnInFlight || this.acpPromptInFlight) return;
+    let earliest = 0;
+    const consider = (deadline: number) => {
+      if (deadline > 0 && (earliest === 0 || deadline < earliest)) earliest = deadline;
+    };
+    if (this.pendingOutOfTurnFinalTexts.length > 0) consider(this.outOfTurnFinalTextDeadlineMs);
+    if (!this.allAnnouncedToolsSettled()) consider(this.outOfTurnToolDrainDeadlineMs);
+    consider(this.outOfTurnNoBrainIdleDeadlineMs);
+    consider(this.unconfirmedOutOfTurnWakeupDeadlineMs);
+    consider(this.wakeupErrorDeadlineMs);
+    if (earliest === 0) return;
+    const delayMs = Math.max(5, earliest - Date.now());
+    const timer = setTimeout(() => {
+      this.outOfTurnDrainTimer = null;
+      this.onBrainTick();
+    }, delayMs);
+    (timer as { unref?: () => void }).unref?.();
+    this.outOfTurnDrainTimer = timer;
+  }
+
+  private allAnnouncedToolsSettled(): boolean {
+    for (const [callId] of this.announcedTools) {
+      if (!this.settledTools.has(callId)) return false;
+    }
+    return true;
+  }
+
+  private settleUnfinishedAnnouncedTools(callbacks: SessionCallbacks): void {
+    for (const [callId] of this.announcedTools) {
+      if (!this.settledTools.has(callId)) {
+        this.settledTools.add(callId);
+        callbacks.onToolResult?.(callId, 'error', undefined);
+      }
+    }
+  }
+
+  private flushPendingOutOfTurnFinalTexts(callbacks: SessionCallbacks): void {
+    while (this.pendingOutOfTurnFinalTexts.length > 0) {
+      const fallbackText = this.pendingOutOfTurnFinalTexts.shift()!;
+      if (this.pendingTools.length > 0 && !this.sawOutOfTurnPostToolText) {
+        this.flushText(callbacks);
+      }
+      const haveTrimmedStart = this.turnText.trimStart();
+      const wantTrimmedStart = fallbackText.trimStart();
+      if (!this.turnText.trim()) {
+        this.turnText += fallbackText;
+        callbacks.onToken(fallbackText);
+      } else if (
+        this.turnText.trim().length < fallbackText.trim().length &&
+        wantTrimmedStart.startsWith(haveTrimmedStart)
+      ) {
+        const suffix = wantTrimmedStart.slice(haveTrimmedStart.length);
+        if (suffix) {
+          this.turnText += suffix;
+          callbacks.onToken(suffix);
+        }
+      }
+      this.sawOutOfTurnPostToolText = false;
+      this.flushText(callbacks);
+    }
+    this.outOfTurnFinalTextDeadlineMs = 0;
+    this.syncOutOfTurnTimer();
+  }
+
+  private refreshOutOfTurnIdleDeadlines(): void {
+    if (!this._turnInFlight || this.acpPromptInFlight) {
+      this.outOfTurnNoBrainIdleDeadlineMs = 0;
+      this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+      return;
+    }
+    const busy = !this.allAnnouncedToolsSettled() || this.pendingPermissions.size > 0 || this.pendingElicitations.size > 0;
+    const hasTranscript = Boolean(this.brainReader && this.sessionId && this.brainReader.hasTranscript(this.sessionId));
+    if (hasTranscript) {
+      this.outOfTurnNoBrainIdleDeadlineMs = 0;
+      if (!this.unconfirmedOutOfTurnWakeup || !this.parentWakeupInFlight || busy) {
+        this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+      } else {
+        const graceMs = this.brainOptions?.wakeupGraceMs ?? DEFAULT_WAKEUP_GRACE_MS;
+        this.unconfirmedOutOfTurnWakeupDeadlineMs = Date.now() + graceMs;
+      }
+    } else {
+      this.unconfirmedOutOfTurnWakeup = false;
+      this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+      if (busy) {
+        this.outOfTurnNoBrainIdleDeadlineMs = 0;
+      } else {
+        const idleMs = this.brainOptions?.outOfTurnNoBrainIdleMs ?? DEFAULT_OUT_OF_TURN_NO_BRAIN_IDLE_MS;
+        this.outOfTurnNoBrainIdleDeadlineMs = Date.now() + idleMs;
+      }
+    }
+    this.syncOutOfTurnTimer();
+  }
+
+  /**
+   * Activate an out-of-turn wakeup turn when `agy acp` 1.5.11+ emits a spontaneous `session/update`, permission prompt,
+   * or elicitation while idle between user turns (or while holding `_turnInFlight` open during `wakeupGraceMs` before
+   * `fs.watch` sees `<SYSTEM_MESSAGE>`).
+   */
+  private beginOutOfTurnWakeupIfIdle(): void {
+    if (this.closed || this.loading || this.starting || this.restartingClient || !this.sessionId) return;
+    if (!this.acpPromptInFlight) this.outOfTurnAcpSupported = true;
+    if (this._turnInFlight) {
+      if (!this.acpPromptInFlight && !this.parentWakeupInFlight && this.pendingOutOfTurnFinalTexts.length === 0) {
+        this.parentWakeupInFlight = true;
+        this.wakeupErrorDeadlineMs = 0;
+        this.unconfirmedOutOfTurnWakeup = Boolean(this.brainReader?.hasTranscript(this.sessionId));
+        this.refreshOutOfTurnIdleDeadlines();
+        this.syncOutOfTurnTimer();
+      }
+      return;
+    }
+    this._turnInFlight = true;
+    this.acpPromptInFlight = false;
+    this.activeUserMessageUuid = undefined;
+    this.parentWakeupInFlight = true;
+    this.wakeupErrorDeadlineMs = 0;
+    this.sawOutOfTurnPostToolText = false;
+    this.pendingOutOfTurnFinalTexts = [];
+    this.outOfTurnFinalTextDeadlineMs = 0;
+    this.outOfTurnToolDrainDeadlineMs = 0;
+    if (this.brainReader) {
+      this.brainReader.startPolling(() => this.onBrainTick());
+      this.brainReader.watchConversation(this.sessionId, () => this.onBrainTick());
+      this.unconfirmedOutOfTurnWakeup = this.brainReader.hasTranscript(this.sessionId);
+    } else {
+      this.unconfirmedOutOfTurnWakeup = false;
+    }
+    this.refreshOutOfTurnIdleDeadlines();
+    this.syncOutOfTurnTimer();
   }
 
   private effectiveSystemPrompt(): string | undefined {
@@ -1119,11 +1323,16 @@ export class AntigravitySession {
     if (this.client !== client || this.closed || this.starting) return;
     const failure = error ?? new Error('Antigravity exited unexpectedly.');
     const callbacks = this.options?.callbacks;
-    if (callbacks) this.abortBackgroundWork(callbacks, 'Antigravity exited unexpectedly');
+    for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
+    this.pendingPermissions.clear();
+    if (callbacks) {
+      this.settleUnfinishedAnnouncedTools(callbacks);
+      this.settleWakeupToolsAsError(callbacks);
+      this.abortBackgroundWork(callbacks, 'Antigravity exited unexpectedly');
+    }
     // The process is gone: further sends fail fast so the manager starts a fresh session instead of writing to a dead pipe.
     this.closed = true;
     this.resetTurnState();
-    this.pendingPermissions.clear();
     this.cancelPendingElicitations();
     this.bridge?.close();
     this.bridge = null;
@@ -1149,32 +1358,93 @@ export class AntigravitySession {
     switch (kind) {
       case 'agent_message_chunk': {
         const text = update.content?.type === 'text' ? update.content.text : undefined;
-        if (this._turnInFlight && typeof text === 'string' && text) {
-          this.turnThought = '';
-          this.lastEmittedThoughtSummary = '';
-          // Text after tool calls starts a new message; the previous one closes with its tools.
-          if (this.pendingTools.length > 0) this.flushText(callbacks);
-          this.turnText += text;
-          callbacks.onToken(text);
+        if (typeof text === 'string' && text) {
+          if (!this.acpPromptInFlight && !this.turnText.trim() && text.trim().length === 0) {
+            break;
+          }
+          if (!this.acpPromptInFlight && this.pendingOutOfTurnFinalTexts.length > 0 && text.trim().length > 0) {
+            const expected = this.pendingOutOfTurnFinalTexts[0];
+            const preview = this.pendingTools.length > 0 ? text : this.turnText + text;
+            const previewTrimStart = preview.trimStart();
+            const expectedTrimStart = expected.trimStart();
+            const isPrefixCompatible =
+              expectedTrimStart.startsWith(previewTrimStart) ||
+              preview.trim() === expected.trim();
+            if (!isPrefixCompatible) {
+              this.flushPendingOutOfTurnFinalTexts(callbacks);
+            }
+          }
+          if (text.trim().length > 0) this.beginOutOfTurnWakeupIfIdle();
+          if (this._turnInFlight) {
+            this.wakeupErrorDeadlineMs = 0;
+            this.turnThought = '';
+            this.lastEmittedThoughtSummary = '';
+            // Text after tool calls starts a new message; the previous one closes with its tools.
+            if (this.pendingTools.length > 0) this.flushText(callbacks);
+            this.turnText += text;
+            callbacks.onToken(text);
+            if (!this.acpPromptInFlight) {
+              if (this.turnText.trim().length > 0) this.sawOutOfTurnPostToolText = true;
+              if (this.pendingOutOfTurnFinalTexts.length > 0) {
+                const expected = this.pendingOutOfTurnFinalTexts[0];
+                const drainMs = this.brainOptions?.outOfTurnTextDrainMs ?? DEFAULT_OUT_OF_TURN_TEXT_DRAIN_MS;
+                if (this.turnText.trim().length >= expected.trim().length) {
+                  this.pendingOutOfTurnFinalTexts.shift();
+                  this.sawOutOfTurnPostToolText = false;
+                  this.flushText(callbacks);
+                  this.outOfTurnFinalTextDeadlineMs = this.pendingOutOfTurnFinalTexts.length > 0 ? Date.now() + drainMs : 0;
+                } else {
+                  this.outOfTurnFinalTextDeadlineMs = Date.now() + drainMs;
+                }
+              }
+              this.refreshOutOfTurnIdleDeadlines();
+              this.syncOutOfTurnTimer();
+              if (!this.parentWakeupInFlight && this.pendingOutOfTurnFinalTexts.length === 0) {
+                // Defer until `AcpClient.receive()` finishes synchronously dispatching all lines in the current stdout chunk.
+                queueMicrotask(() => this.onBrainTick());
+              }
+            }
+          }
         }
         break;
       }
       case 'agent_thought_chunk': {
         const thought = update.content?.type === 'text' ? update.content.text : undefined;
-        if (this._turnInFlight && !this.turnText && typeof thought === 'string' && thought) {
-          this.turnThought += thought;
-          const summary = extractAntigravityThoughtSummary(this.turnThought);
-          if (summary && summary !== this.lastEmittedThoughtSummary) {
-            this.lastEmittedThoughtSummary = summary;
-            callbacks.onThinking?.(summary);
+        if (typeof thought === 'string' && thought) {
+          if (thought.trim().length > 0) {
+            if (!this.acpPromptInFlight && this.pendingOutOfTurnFinalTexts.length > 0) {
+              this.flushPendingOutOfTurnFinalTexts(callbacks);
+            }
+            this.beginOutOfTurnWakeupIfIdle();
+          }
+          if (this._turnInFlight && !this.turnText.trim()) {
+            this.wakeupErrorDeadlineMs = 0;
+            this.turnThought += thought;
+            const summary = extractAntigravityThoughtSummary(this.turnThought);
+            if (summary && summary !== this.lastEmittedThoughtSummary) {
+              this.lastEmittedThoughtSummary = summary;
+              callbacks.onThinking?.(summary);
+            }
+            if (!this.acpPromptInFlight) this.refreshOutOfTurnIdleDeadlines();
           }
         }
         break;
       }
       case 'tool_call':
-      case 'tool_call_update':
+        if (!this.acpPromptInFlight && this.pendingOutOfTurnFinalTexts.length > 0) {
+          this.flushPendingOutOfTurnFinalTexts(callbacks);
+        }
+        this.beginOutOfTurnWakeupIfIdle();
         this.handleTool(update as AcpToolCall, callbacks);
         break;
+      case 'tool_call_update': {
+        const updateCallId = String((update as AcpToolCall).toolCallId ?? '');
+        if (!this.acpPromptInFlight && !this.loading && (!updateCallId || !this.announcedTools.has(updateCallId))) {
+          this.outOfTurnAcpSupported = true;
+        }
+        this.handleTool(update as AcpToolCall, callbacks);
+        break;
+      }
       case 'usage_update':
         this.latestContextUsage = antigravityContextUsage(Number(update.used), Number(update.size), this.activeModel);
         break;
@@ -1199,8 +1469,10 @@ export class AntigravitySession {
   }
 
   private handleTool(tool: AcpToolCall, callbacks: SessionCallbacks): void {
+    if (!this._turnInFlight) return;
     const callId = String(tool.toolCallId ?? '');
     if (!callId) return;
+    this.wakeupErrorDeadlineMs = 0;
     const known = this.announcedTools.get(callId);
     const merged: AcpToolCall = {
       ...known,
@@ -1210,6 +1482,12 @@ export class AntigravitySession {
       args: tool.args ?? known?.args,
     };
     if (!known) {
+      if (!this.acpPromptInFlight) {
+        if (this.pendingOutOfTurnFinalTexts.length > 0) {
+          this.flushPendingOutOfTurnFinalTexts(callbacks);
+        }
+        this.sawOutOfTurnPostToolText = false;
+      }
       this.turnThought = '';
       this.lastEmittedThoughtSummary = '';
       this.announcedTools.set(callId, merged);
@@ -1230,18 +1508,22 @@ export class AntigravitySession {
     const status = tool.status;
     if ((status === 'completed' || status === 'failed') && !this.settledTools.has(callId)) {
       this.settledTools.add(callId);
-      if (status === 'completed' && EDIT_KINDS.has(merged.kind ?? '')) {
+      if (status === 'completed' && (EDIT_KINDS.has(merged.kind ?? '') || merged.name === 'write_file' || merged.name === 'edit_file')) {
         const paths = antigravityEditedPaths(merged);
         if (paths.length > 0) callbacks.onFilesEdited?.(paths);
       }
       const started = this.toolStartedAt.get(callId);
       callbacks.onToolResult?.(callId, status === 'completed' ? 'success' : 'error', started ? Math.max(0, Date.now() - started) : undefined);
-      // When `invoke_subagent` or a background task settles over ACP, check the brain transcript right away so the
-      // subagent pill appears without waiting for the next timer tick.
-      if (status === 'completed' && (merged.name === 'invoke_subagent' || merged.name === 'schedule' || merged.name === 'run_command' || merged.name === 'manage_subagents' || merged.name === 'send_message')) {
-        this.onBrainTick();
+      if (this.outOfTurnToolDrainDeadlineMs > 0 && this.allAnnouncedToolsSettled()) {
+        this.outOfTurnToolDrainDeadlineMs = 0;
+        this.syncOutOfTurnTimer();
+        queueMicrotask(() => this.onBrainTick());
+      } else if (status === 'completed' && (merged.name === 'invoke_subagent' || merged.name === 'schedule' || merged.name === 'run_command' || merged.name === 'manage_subagents' || merged.name === 'send_message')) {
+        // Defer until `AcpClient.receive()` finishes synchronously dispatching all lines in the current stdout chunk.
+        queueMicrotask(() => this.onBrainTick());
       }
     }
+    if (!this.acpPromptInFlight) this.refreshOutOfTurnIdleDeadlines();
   }
 
   /** Close the current assistant message: its text and the tool calls that followed it. */
@@ -1273,12 +1555,7 @@ export class AntigravitySession {
     this.applyTurnUsage(result?.usage, callbacks);
     const sessionId = this.sessionId ?? '';
     // Settle tools the agent never reported as finished (cancelled mid-call) so no card spins forever.
-    for (const [callId] of this.announcedTools) {
-      if (!this.settledTools.has(callId)) {
-        this.settledTools.add(callId);
-        callbacks.onToolResult?.(callId, 'error', undefined);
-      }
-    }
+    this.settleUnfinishedAnnouncedTools(callbacks);
     if (stopReason === 'cancelled') {
       // The streamed tokens already cover any partial text, so no late message is appended.
       this.abortBackgroundWork(callbacks, 'Interrupted');
@@ -1306,6 +1583,7 @@ export class AntigravitySession {
       callbacks.onNotification?.(`Antigravity stopped early (${stopReason.replace(/_/g, ' ')}).`, 'medium');
     }
     this.acpPromptInFlight = false;
+    if (this.pendingWakeups > 0) this.refreshWakeupGraceDeadline();
 
     // Stream any post-ACP wakeup steps that already landed, and hold the turn open while subagents or wakeups remain.
     this.syncParentPostAcp(callbacks);
@@ -1322,22 +1600,43 @@ export class AntigravitySession {
   private completeTurn(callbacks: SessionCallbacks): void {
     if (this.closed || !this._turnInFlight) return;
     const sessionId = this.sessionId ?? '';
+    const completedUuid = this.activeUserMessageUuid;
+    this.activeUserMessageUuid = undefined;
+    this.settleUnfinishedAnnouncedTools(callbacks);
+    if (this.wakeupPendingTools.length > 0) this.settleWakeupTools(callbacks, 'error');
+    if (this.pendingOutOfTurnFinalTexts.length > 0) this.flushPendingOutOfTurnFinalTexts(callbacks);
     this.flushText(callbacks);
     this._turnInFlight = false;
     this.acpPromptInFlight = false;
     this.pendingWakeups = 0;
-    this.wakeupDeadlineMs = 0;
+    this.wakeupGraceDeadlineMs = 0;
+    this.wakeupErrorDeadlineMs = 0;
     this.parentWakeupInFlight = false;
     this.wakeupPendingTools = [];
     this.wakeupToolStallDeadlineMs = 0;
     this.promotingWakeup = false;
+    this.sawOutOfTurnPostToolText = false;
+    this.pendingOutOfTurnFinalTexts = [];
+    this.outOfTurnFinalTextDeadlineMs = 0;
+    this.outOfTurnToolDrainDeadlineMs = 0;
+    this.outOfTurnNoBrainIdleDeadlineMs = 0;
+    this.unconfirmedOutOfTurnWakeup = false;
+    this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+    this.clearOutOfTurnDrainTimer();
     this.brainReader?.stopWatching();
     this.turns++;
-    callbacks.onDone(sessionId, 0, 1);
+    if (this.queuedTurns.length > 0 || completedUuid) {
+      callbacks.onDone(sessionId, 0, 1, {
+        ...(this.queuedTurns.length > 0 ? { queuedTurnCount: this.queuedTurns.length } : {}),
+        ...(completedUuid ? { userMessageUuid: completedUuid } : {}),
+      });
+    } else {
+      callbacks.onDone(sessionId, 0, 1);
+    }
 
     if (this.maybeSyncPermissionFlagAfterTurn(callbacks)) return;
     const next = this.queuedTurns.shift();
-    if (next && !this.closed) this.startTurn(next.text, next.images);
+    if (next && !this.closed) this.startTurn(next.text, next.images, next.userMessageUuid);
   }
 
   // ── Brain transcript subagent & wakeup tracking ──────────────────────────
@@ -1351,11 +1650,14 @@ export class AntigravitySession {
 
   private hasPendingBackgroundActivity(now: number): boolean {
     if (this.promotingWakeup) return true;
+    if (this.pendingPermissions.size > 0) return true;
     if (this.pendingElicitations.size > 0) return true;
     if (this.hasRunningSubagents()) return true;
     if (this.activeBgTaskIds.size > 0) return true;
     if (this.parentWakeupInFlight) return true;
-    if (this.pendingWakeups > 0 && now < this.wakeupDeadlineMs) return true;
+    if (this.pendingOutOfTurnFinalTexts.length > 0) return true;
+    if (!this.allAnnouncedToolsSettled() && this.outOfTurnToolDrainDeadlineMs > 0 && now < this.outOfTurnToolDrainDeadlineMs) return true;
+    if (!this.parentWakeupInFlight && this.pendingWakeups > 0 && now < this.wakeupGraceDeadlineMs) return true;
     return false;
   }
 
@@ -1364,7 +1666,15 @@ export class AntigravitySession {
   }
 
   private refreshWakeupToolStallDeadline(): void {
-    if (this.spawnedWithSkipPermissions || this.acpPromptInFlight || !this.hasPermissionSensitiveWakeupTool()) {
+    if (
+      this.spawnedWithSkipPermissions ||
+      this.outOfTurnAcpSupported ||
+      this.acpPromptInFlight ||
+      this.pendingPermissions.size > 0 ||
+      this.pendingElicitations.size > 0 ||
+      this.bridgeCallsInFlight > 0 ||
+      !this.hasPermissionSensitiveWakeupTool()
+    ) {
       this.wakeupToolStallDeadlineMs = 0;
       return;
     }
@@ -1372,16 +1682,20 @@ export class AntigravitySession {
     this.wakeupToolStallDeadlineMs = Date.now() + stallMs;
   }
 
+  private refreshWakeupGraceDeadline(): void {
+    const graceMs = this.brainOptions?.wakeupGraceMs ?? DEFAULT_WAKEUP_GRACE_MS;
+    this.wakeupGraceDeadlineMs = Date.now() + graceMs;
+  }
+
   private noteExpectedParentWakeup(): void {
     this.pendingWakeups++;
-    const graceMs = this.brainOptions?.wakeupGraceMs ?? DEFAULT_WAKEUP_GRACE_MS;
-    this.wakeupDeadlineMs = Date.now() + graceMs;
+    this.refreshWakeupGraceDeadline();
   }
 
   private onBrainTick(): void {
     const callbacks = this.options?.callbacks;
-    if (this.closed || !this._turnInFlight || !callbacks || !this.sessionId || !this.brainReader) return;
-    this.brainReader.watchConversation(this.sessionId, () => this.onBrainTick());
+    if (this.closed || !this._turnInFlight || !callbacks || !this.sessionId) return;
+    this.brainReader?.watchConversation(this.sessionId, () => this.onBrainTick());
     if (this.promotingWakeup) return;
     if (this.acpPromptInFlight) {
       this.syncParentDuringAcp(callbacks);
@@ -1391,10 +1705,44 @@ export class AntigravitySession {
     this.syncSubagentTranscripts(callbacks);
     this.syncParentPostAcp(callbacks);
     this.syncSubagentTranscripts(callbacks);
+    if (this.pendingOutOfTurnFinalTexts.length > 0 && Date.now() >= this.outOfTurnFinalTextDeadlineMs) {
+      this.flushPendingOutOfTurnFinalTexts(callbacks);
+    }
+    if (this.outOfTurnToolDrainDeadlineMs > 0 && Date.now() >= this.outOfTurnToolDrainDeadlineMs) {
+      this.outOfTurnToolDrainDeadlineMs = 0;
+    }
     if (
+      this.parentWakeupInFlight &&
+      this.unconfirmedOutOfTurnWakeup &&
+      this.unconfirmedOutOfTurnWakeupDeadlineMs > 0 &&
+      this.allAnnouncedToolsSettled() &&
+      this.pendingPermissions.size === 0 &&
+      this.pendingElicitations.size === 0 &&
+      Date.now() >= this.unconfirmedOutOfTurnWakeupDeadlineMs
+    ) {
+      this.unconfirmedOutOfTurnWakeup = false;
+      this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+      this.parentWakeupInFlight = false;
+    }
+    if (
+      this.parentWakeupInFlight &&
+      (!this.brainReader || !this.brainReader.hasTranscript(this.sessionId)) &&
+      this.outOfTurnNoBrainIdleDeadlineMs > 0 &&
+      this.allAnnouncedToolsSettled() &&
+      this.pendingPermissions.size === 0 &&
+      this.pendingElicitations.size === 0 &&
+      Date.now() >= this.outOfTurnNoBrainIdleDeadlineMs
+    ) {
+      this.outOfTurnNoBrainIdleDeadlineMs = 0;
+      this.parentWakeupInFlight = false;
+    }
+    this.syncOutOfTurnTimer();
+    if (
+      !this.outOfTurnAcpSupported &&
       !this.spawnedWithSkipPermissions &&
       this.wakeupToolStallDeadlineMs > 0 &&
       this.bridgeCallsInFlight === 0 &&
+      this.pendingPermissions.size === 0 &&
       this.pendingElicitations.size === 0 &&
       this.hasPermissionSensitiveWakeupTool() &&
       Date.now() >= this.wakeupToolStallDeadlineMs
@@ -1438,75 +1786,137 @@ export class AntigravitySession {
     }
   }
 
-  /** Stream reactive wakeup steps written to `<brainDir>/<sessionId>` after `session/prompt` returned. */
-  private syncParentPostAcp(callbacks: SessionCallbacks): void {
+  /**
+   * Stream or coordinate reactive wakeup steps written to `<brainDir>/<sessionId>` after `session/prompt` returned.
+   * On `agy acp` 1.5.11+ (`outOfTurnAcpSupported`), live text/thought/tool updates arrive natively over ACP, so this
+   * pass harvests only subagent/background-task metadata and turn-completion boundaries unless `offlineCatchUp` is set.
+   */
+  private syncParentPostAcp(callbacks: SessionCallbacks, offlineCatchUp = false): void {
     const sessionId = this.sessionId;
     if (!sessionId || !this.brainReader) return;
+    const streamFromBrain = offlineCatchUp || !this.outOfTurnAcpSupported;
     const steps = this.brainReader.readNewSteps(sessionId);
     for (const step of steps) {
       if (step.type === 'SYSTEM_MESSAGE') {
+        this.unconfirmedOutOfTurnWakeup = false;
+        this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
         this.consumeParentWakeupStep(step, callbacks, true);
       } else if (step.type === 'PLANNER_RESPONSE') {
+        this.unconfirmedOutOfTurnWakeup = false;
+        this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
         this.parentWakeupInFlight = true;
+        this.wakeupErrorDeadlineMs = 0;
         this.parentPendingSpawns = [];
         this.parentPendingToolCalls = [];
-        if (typeof step.content === 'string' && step.content) {
-          this.turnThought = '';
-          this.lastEmittedThoughtSummary = '';
-          if (this.pendingTools.length > 0) this.flushText(callbacks);
-          this.turnText += step.content;
-          callbacks.onToken(step.content);
-        } else if (typeof step.thinking === 'string' && step.thinking) {
-          const summary = extractAntigravityThoughtSummary(step.thinking);
-          if (summary && summary !== this.lastEmittedThoughtSummary) {
-            this.lastEmittedThoughtSummary = summary;
-            callbacks.onThinking?.(summary);
-          }
-        }
         const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
-        if (calls.length > 0) {
-          for (let i = 0; i < calls.length; i++) {
-            const tc = calls[i];
-            this.trackParentToolCallMeta(tc.name, tc.args, callbacks);
-            const callId = typeof tc.id === 'string' && tc.id ? tc.id : `wakeup-${step.step_index}-${i}`;
-            const tool: AcpToolCall = { toolCallId: callId, name: tc.name, args: tc.args };
-            const record: ToolCallRecord = {
-              toolUseId: callId,
-              name: antigravityToolName(tool.name, tool.kind, tool.rawInput ?? tool.args),
-              summary: antigravityToolSummary(tool),
-              status: 'pending',
-              timestamp: Date.now(),
-            };
-            this.pendingTools.push(record);
-            this.wakeupPendingTools.push({ callId, tool, startedAt: Date.now() });
-            callbacks.onToolUse(record);
+        if (streamFromBrain) {
+          if (typeof step.content === 'string' && step.content) {
+            this.turnThought = '';
+            this.lastEmittedThoughtSummary = '';
+            if (this.pendingTools.length > 0) this.flushText(callbacks);
+            this.turnText += step.content;
+            callbacks.onToken(step.content);
+          } else if (typeof step.thinking === 'string' && step.thinking) {
+            const summary = extractAntigravityThoughtSummary(step.thinking);
+            if (summary && summary !== this.lastEmittedThoughtSummary) {
+              this.lastEmittedThoughtSummary = summary;
+              callbacks.onThinking?.(summary);
+            }
           }
-          if (this.wakeupToolStallDeadlineMs === 0) this.refreshWakeupToolStallDeadline();
-        } else if (step.status === 'DONE') {
-          this.settleWakeupTools(callbacks, 'success');
-          this.flushText(callbacks);
-          this.parentWakeupInFlight = false;
+          if (calls.length > 0) {
+            for (let i = 0; i < calls.length; i++) {
+              const tc = calls[i];
+              this.trackParentToolCallMeta(tc.name, tc.args, callbacks);
+              const callId = typeof tc.id === 'string' && tc.id ? tc.id : `wakeup-${step.step_index}-${i}`;
+              const tool: AcpToolCall = { toolCallId: callId, name: tc.name, args: tc.args };
+              const record: ToolCallRecord = {
+                toolUseId: callId,
+                name: antigravityToolName(tool.name, tool.kind, tool.rawInput ?? tool.args),
+                summary: antigravityToolSummary(tool),
+                status: 'pending',
+                timestamp: Date.now(),
+              };
+              this.pendingTools.push(record);
+              this.wakeupPendingTools.push({ callId, tool, startedAt: Date.now() });
+              callbacks.onToolUse(record);
+            }
+            if (this.wakeupToolStallDeadlineMs === 0) this.refreshWakeupToolStallDeadline();
+          } else if (step.status === 'DONE') {
+            this.settleWakeupTools(callbacks, 'success');
+            this.flushText(callbacks);
+            this.parentWakeupInFlight = false;
+            if (this.pendingWakeups > 0) this.refreshWakeupGraceDeadline();
+          }
+        } else {
+          if (calls.length > 0) {
+            for (const tc of calls) this.trackParentToolCallMeta(tc.name, tc.args, callbacks);
+          } else if (step.status === 'DONE') {
+            if (this.wakeupPendingTools.length > 0) this.settleWakeupTools(callbacks, 'success');
+            this.parentWakeupInFlight = false;
+            if (this.pendingWakeups > 0) this.refreshWakeupGraceDeadline();
+            if (this.pendingTools.length > 0 && !this.sawOutOfTurnPostToolText) {
+              this.flushText(callbacks);
+            }
+            const drainMs = this.brainOptions?.outOfTurnTextDrainMs ?? DEFAULT_OUT_OF_TURN_TEXT_DRAIN_MS;
+            if (!this.allAnnouncedToolsSettled()) {
+              this.outOfTurnToolDrainDeadlineMs = Date.now() + drainMs;
+            }
+            const expectedTrimmed = typeof step.content === 'string' ? step.content.trim() : '';
+            const matchesCurrentTurnText =
+              this.pendingOutOfTurnFinalTexts.length === 0 &&
+              expectedTrimmed.length > 0 &&
+              this.turnText.trim() === expectedTrimmed;
+            const needsDrain = expectedTrimmed.length > 0 && !matchesCurrentTurnText;
+            if (needsDrain) {
+              this.pendingOutOfTurnFinalTexts.push(step.content!);
+              this.outOfTurnFinalTextDeadlineMs = Date.now() + drainMs;
+            } else if (this.pendingOutOfTurnFinalTexts.length === 0) {
+              this.sawOutOfTurnPostToolText = false;
+              this.flushText(callbacks);
+            }
+            this.syncOutOfTurnTimer();
+          }
         }
       } else if (step.type === 'GENERIC') {
+        this.unconfirmedOutOfTurnWakeup = false;
+        this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+        this.wakeupErrorDeadlineMs = 0;
         this.harvestParentGenericStep(step, callbacks);
-        const pending = this.wakeupPendingTools.shift();
-        if (pending) {
-          const ok = step.status !== 'ERROR';
-          if (ok && (pending.tool.name === 'write_file' || pending.tool.name === 'edit_file')) {
-            const paths = antigravityEditedPaths(pending.tool);
-            if (paths.length > 0) callbacks.onFilesEdited?.(paths);
+        if (streamFromBrain) {
+          const pending = this.wakeupPendingTools.shift();
+          if (pending) {
+            const ok = step.status !== 'ERROR';
+            if (ok && (pending.tool.name === 'write_file' || pending.tool.name === 'edit_file')) {
+              const paths = antigravityEditedPaths(pending.tool);
+              if (paths.length > 0) callbacks.onFilesEdited?.(paths);
+            }
+            callbacks.onToolResult?.(pending.callId, ok ? 'success' : 'error', Math.max(0, Date.now() - pending.startedAt));
           }
-          callbacks.onToolResult?.(pending.callId, ok ? 'success' : 'error', Math.max(0, Date.now() - pending.startedAt));
+          this.refreshWakeupToolStallDeadline();
         }
-        this.refreshWakeupToolStallDeadline();
       } else if (step.type === 'ERROR_MESSAGE' && this.parentWakeupInFlight) {
-        // `agy` often retries stream hiccups on the next step; bound the wait if no retry arrives.
+        this.unconfirmedOutOfTurnWakeup = false;
+        this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
+        // `agy` often retries stream hiccups on the next step; bound the wait if no retry arrives without clobbering
+        // `wakeupGraceDeadlineMs` used by child wakeup tracking.
         const graceMs = this.brainOptions?.wakeupGraceMs ?? DEFAULT_WAKEUP_GRACE_MS;
-        this.wakeupDeadlineMs = Date.now() + graceMs;
+        this.wakeupErrorDeadlineMs = Date.now() + graceMs;
+        this.syncOutOfTurnTimer();
       }
     }
-    if (this.parentWakeupInFlight && this.wakeupDeadlineMs > 0 && !this.hasRunningSubagents() && this.activeBgTaskIds.size === 0 && Date.now() >= this.wakeupDeadlineMs && this.wakeupPendingTools.length === 0) {
+    if (
+      this.parentWakeupInFlight &&
+      this.wakeupErrorDeadlineMs > 0 &&
+      this.allAnnouncedToolsSettled() &&
+      this.wakeupPendingTools.length === 0 &&
+      this.pendingPermissions.size === 0 &&
+      this.pendingElicitations.size === 0 &&
+      Date.now() >= this.wakeupErrorDeadlineMs
+    ) {
+      this.wakeupErrorDeadlineMs = 0;
       this.parentWakeupInFlight = false;
+      if (this.pendingWakeups > 0) this.refreshWakeupGraceDeadline();
+      this.syncOutOfTurnTimer();
     }
   }
 
@@ -1626,7 +2036,9 @@ export class AntigravitySession {
     }
     if (startWakeupTurn) {
       this.parentWakeupInFlight = true;
-      this.wakeupDeadlineMs = 0;
+      if (this.pendingWakeups === 0) this.wakeupGraceDeadlineMs = 0;
+      this.wakeupErrorDeadlineMs = 0;
+      if (!this.turnText.trim()) this.sawOutOfTurnPostToolText = false;
       callbacks.onRawEvent?.({ type: 'antigravity/wakeup_system_message', stepIndex: step.step_index, senders: parsed.senders });
     }
   }
@@ -1696,6 +2108,8 @@ export class AntigravitySession {
                 callbacks.onTaskNotification?.(subagent.id, 'completed', summary);
                 if (!subagent.sentMessageThisRun && !subagent.parentAgentId) {
                   this.noteExpectedParentWakeup();
+                } else if (this.pendingWakeups > 0) {
+                  this.refreshWakeupGraceDeadline();
                 }
               }
             }
@@ -1752,9 +2166,12 @@ export class AntigravitySession {
       sessionId,
       stalledTools: this.wakeupPendingTools.map((t) => t.tool.name ?? 'unknown'),
     });
+    this.settleUnfinishedAnnouncedTools(callbacks);
     this.settleWakeupToolsAsError(callbacks);
     this.flushText(callbacks);
     this.parentWakeupInFlight = false;
+    this.unconfirmedOutOfTurnWakeup = false;
+    this.unconfirmedOutOfTurnWakeupDeadlineMs = 0;
 
     client.notify('session/cancel', { sessionId });
     const settleMs = this.brainOptions?.wakeupCancelSettleMs ?? DEFAULT_WAKEUP_CANCEL_SETTLE_MS;
@@ -1782,6 +2199,10 @@ export class AntigravitySession {
       .then((result) => this.finishTurn(result))
       .catch((error) => {
         if (this.closed || !this._turnInFlight) return;
+        for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
+        this.pendingPermissions.clear();
+        this.settleUnfinishedAnnouncedTools(callbacks);
+        this.settleWakeupToolsAsError(callbacks);
         this.abortBackgroundWork(callbacks, 'Failed');
         this.cancelPendingElicitations();
         this.resetTurnState();
@@ -1833,6 +2254,13 @@ export class AntigravitySession {
     const select = (kind: string, fallback: string) => ({ outcome: { outcome: 'selected', optionId: optionId(kind, fallback) } });
     const cancelled = { outcome: { outcome: 'cancelled' } };
     if (!callbacks || this.closed) return cancelled;
+    if (params?.sessionId && params.sessionId === this.sessionId && !this.loading) {
+      if (!this.acpPromptInFlight && this.pendingOutOfTurnFinalTexts.length > 0) {
+        this.flushPendingOutOfTurnFinalTexts(callbacks);
+      }
+      this.beginOutOfTurnWakeupIfIdle();
+      this.wakeupErrorDeadlineMs = 0;
+    }
     // Mirror the permission card into the raw log so a recorded thread shows what was asked.
     callbacks.onRawEvent?.({ type: 'antigravity/permission_request', toolCall: tool });
 
@@ -1856,9 +2284,13 @@ export class AntigravitySession {
         if (answered) return;
         answered = true;
         this.pendingPermissions.delete(key);
+        this.refreshWakeupToolStallDeadline();
+        this.refreshOutOfTurnIdleDeadlines();
         resolve(outcome);
       };
       this.pendingPermissions.set(key, (outcome) => settle(outcome.outcome === 'cancelled' ? cancelled : outcome));
+      this.refreshWakeupToolStallDeadline();
+      this.refreshOutOfTurnIdleDeadlines();
       callbacks.onPermissionRequest(`Antigravity: ${antigravityToolName(tool.name, kind, tool.rawInput ?? tool.args)}`, antigravityPermissionDetail(tool))
         .then((allow) => settle(allow ? select('allow_once', 'allow') : select('reject_once', 'deny')))
         .catch(() => settle(select('reject_once', 'deny')));
@@ -1869,6 +2301,13 @@ export class AntigravitySession {
   async handleElicitationCreate(params: AntigravityElicitationParams | undefined): Promise<Record<string, unknown>> {
     const callbacks = this.options?.callbacks;
     if (!callbacks || this.closed) return { action: 'cancel' };
+    if (params?.sessionId && params.sessionId === this.sessionId && !this.loading) {
+      if (!this.acpPromptInFlight && this.pendingOutOfTurnFinalTexts.length > 0) {
+        this.flushPendingOutOfTurnFinalTexts(callbacks);
+      }
+      this.beginOutOfTurnWakeupIfIdle();
+      this.wakeupErrorDeadlineMs = 0;
+    }
     callbacks.onRawEvent?.({
       type: 'antigravity/elicitation_create',
       toolCallId: params?.toolCallId,
@@ -1891,9 +2330,13 @@ export class AntigravitySession {
         if (answered) return;
         answered = true;
         this.pendingElicitations.delete(key);
+        this.refreshWakeupToolStallDeadline();
+        this.refreshOutOfTurnIdleDeadlines();
         resolve(result);
       };
       this.pendingElicitations.set(key, settle);
+      this.refreshWakeupToolStallDeadline();
+      this.refreshOutOfTurnIdleDeadlines();
       callbacks.onAskUserQuestion(fields.map((field) => field.askQuestion))
         .then((answers) => settle(buildAntigravityElicitationReply(fields, answers)))
         .catch(() => settle({ action: 'cancel' }));
