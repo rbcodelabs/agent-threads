@@ -78,9 +78,12 @@ if (a === 'build') {
   if (!state.images[base]) { err(`base image ${base} not found`); done(1); }
   const dockerfile = readFileSync(flag('-f'), 'utf8');
   if (!dockerfile.includes('FROM ${BASE_IMAGE}')) { err('Dockerfile does not use BASE_IMAGE'); done(1); }
-  const refreshed = dockerfileText.includes('RUN npm install --global --ignore-scripts');
+  const refreshed = flag('--tag').includes('-harness-refresh-');
+  const pins = JSON.parse(readFileSync(new URL('../../sandbox/harness-versions.json', import.meta.url), 'utf8'));
   state.images[flag('--tag')] = {
     built: true, label: flag('--label'), harnesses: refreshed ? state.images[base].harnesses : harnesses, buildArgs,
+    ...(dockerfileText.includes('claude.ai/install.sh') ? { claudeVersion: pins.claude } : {}),
+    ...(buildArgs.INSTALL_ANTIGRAVITY === '1' ? { antigravityVersion: pins.antigravity.version } : {}),
     ...(buildArgs.CODEX_VERSION ? { codexVersion: buildArgs.CODEX_VERSION } : {}),
   };
   out('build done');
@@ -125,7 +128,7 @@ if (a === 'run') {
     done(0);
   }
   const name = flag('--name');
-  if (fails.has('run:codex-candidate') && image.includes('-codex-refresh-')) { err('candidate failed to start'); done(1); }
+  if (fails.has('run:codex-candidate') && image.includes('-harness-refresh-')) { err('candidate failed to start'); done(1); }
   if (fails.has('run:name') || state.containers[name]) { err(`container ${name} already exists`); done(1); }
   const publish = flag('-p') ?? '';
   const hostPort = Number(publish.split(':')[1]);
@@ -203,6 +206,8 @@ if (a === 'exec') {
     const have = state.images[c.image]?.harnesses ?? ['claude'];
     if (fails.has('exec:probe')) { err('probe failed'); done(1); }
     for (const h of ['claude', 'codex', 'opencode', 'antigravity']) out(`${h}.cli=${have.includes(h) ? 1 : 0}`);
+    if (state.images[c.image]?.claudeVersion) out(`claude.version=${state.images[c.image].claudeVersion} (Claude Code)`);
+    if (state.images[c.image]?.antigravityVersion) out(`antigravity.version=${state.images[c.image].antigravityVersion}`);
     if (state.images[c.image]?.codexVersion) out(`codex.version=codex-cli ${state.images[c.image].codexVersion}`);
     for (const h of ['codex', 'opencode', 'antigravity']) out(`${h}.auth=${state.volumes[dataVol]?.auth?.[h] ? 1 : 0}`);
     done(0);

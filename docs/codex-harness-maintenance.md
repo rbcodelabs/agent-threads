@@ -47,3 +47,19 @@ signed-in account needs a separate authenticated check.
 Pin changes follow the ordinary Agent Threads release process. The candidate
 workflow builds and removes a local image in each job and leaves installation to
 the operator in Local daemon settings.
+
+## Claude and Antigravity
+
+The local daemon uses reviewed CLI versions for Claude Code and Google
+Antigravity. The Claude CLI pin is separate from the bundled Agent SDK.
+Antigravity is pinned to Google's versioned release archive and SHA-512 for
+each supported Linux architecture.
+
+Run `node scripts/managed-harness-versions.mjs` to inspect upstream releases,
+or add `--write` to prepare a pin diff for review. The two Antigravity
+architectures must agree on the release version.
+
+In Local daemon settings, **Update harnesses** previews the measured and
+target versions for the enabled managed harnesses. The idle-only update
+replaces the shared container and reuses its named volumes. A failed
+startup or version check triggers restoration of the prior image.

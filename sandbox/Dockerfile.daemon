@@ -126,24 +126,38 @@ ARG OPENCODE_VERSION=1.18.32
 USER root
 RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/harnesses /opt/harnesses/bin
 COPY sandbox/codex-version.json /opt/harnesses/codex-version.json
+COPY sandbox/harness-versions.json /opt/agent-threads/harness-versions.json
 USER agentthreads
 # opencode-ai fetches/links its platform binary in a postinstall script. npm 11 blocks dependency install scripts by
 # default (a silent skip leaves a launcher with no binary), so that one package is explicitly allowed; older npm
-# ignores the flag. Antigravity's installer runs with HOME=/opt/harnesses so staging and `agy install`'s duplicate copy
-# never touch the persisted HOME volume, and cleans them afterwards. The `--version` calls fail the build if any CLI
-# did not end up runnable.
+# ignores the flag.
 RUN set -eu; \
     pkgs=""; \
     if [ "$INSTALL_CODEX" = "1" ]; then CODEX_VERSION="${CODEX_VERSION:-$(node -p "require('/opt/harnesses/codex-version.json').version")}"; echo "$CODEX_VERSION" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+$'; pkgs="$pkgs @openai/codex@${CODEX_VERSION}"; fi; \
     if [ "$INSTALL_OPENCODE" = "1" ]; then pkgs="$pkgs opencode-ai@${OPENCODE_VERSION}"; fi; \
     if [ -n "$pkgs" ]; then npm install --global --no-audit --no-fund --allow-scripts=opencode-ai --prefix /opt/harnesses $pkgs; fi; \
-    if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then \
-      HOME=/opt/harnesses curl -fsSL https://antigravity.google/cli/install.sh | HOME=/opt/harnesses bash -s -- --dir /opt/harnesses/bin; \
-      rm -rf /opt/harnesses/.cache /opt/harnesses/.local /opt/harnesses/.gemini /opt/harnesses/.bashrc /opt/harnesses/.profile; \
-    fi; \
     if [ "$INSTALL_CODEX" = "1" ]; then /opt/harnesses/bin/codex --version | grep -Fx "codex-cli $CODEX_VERSION"; fi; \
-    if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi; \
-    if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then /opt/harnesses/bin/agy --version; fi
+    if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi
+USER root
+RUN set -eu; \
+    if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then \
+      case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) exit 1 ;; esac; \
+      pins=/opt/agent-threads/harness-versions.json; \
+      url="$(node -p "require('$pins').antigravity.artifacts.$arch.url")"; \
+      hash="$(node -p "require('$pins').antigravity.artifacts.$arch.sha512")"; \
+      curl -fsSL "$url" -o /tmp/agy.tar.gz; \
+      printf '%s  /tmp/agy.tar.gz\n' "$hash" | sha512sum -c -; \
+      install -d -m 0755 /opt/antigravity; \
+      tar -xOzf /tmp/agy.tar.gz antigravity > /opt/antigravity/agy; \
+      chmod 0755 /opt/antigravity/agy; \
+      ln -sfn /opt/antigravity/agy /opt/harnesses/bin/agy; \
+      rm /tmp/agy.tar.gz; \
+    fi
+USER agentthreads
+RUN if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then \
+      version="$(node -p "require('/opt/agent-threads/harness-versions.json').antigravity.version")"; \
+      /opt/antigravity/agy --version | grep -Ex "((agy|Antigravity|Version:) )?$version"; \
+    fi
 ENV PATH="/opt/harnesses/bin:${PATH}"
 
 FROM ${BASE_IMAGE} AS with-claude
@@ -151,8 +165,14 @@ USER root
 # The Claude CLI goes OUTSIDE every VOLUME path. Under /var/lib/agent-threads/home it would be copied into a named
 # volume once and then frozen there across image upgrades (or hidden entirely by a bind mount). The login and the
 # sessions still live in the persisted HOME; only the program itself is part of the image.
+COPY sandbox/harness-versions.json /opt/agent-threads/harness-versions.json
 RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/claude
 USER agentthreads
-RUN curl -fsSL https://claude.ai/install.sh | HOME=/opt/claude bash
+RUN set -eu; \
+    version="$(node -p "require('/opt/agent-threads/harness-versions.json').claude")"; \
+    curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh; \
+    HOME=/opt/claude bash /tmp/install-claude.sh "$version"; \
+    rm /tmp/install-claude.sh; \
+    /opt/claude/.local/bin/claude --version | grep -Fx "$version (Claude Code)"
 ENV PATH="/opt/claude/.local/bin:${PATH}" \
     DISABLE_AUTOUPDATER=1

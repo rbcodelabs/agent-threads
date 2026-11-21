@@ -10,6 +10,7 @@
  * kept out of every message.
  */
 
+import harnessPins from '../../sandbox/harness-versions.json';
 import codexPin from '../../sandbox/codex-version.json';
 import { VM_LIFECYCLE_TIMEOUT_MS, type VmCommandResult, type VmCommandRunner } from '../containerCli';
 import {
@@ -19,7 +20,8 @@ import {
   LOCAL_TOKEN_NAME,
   VERIFY_OK_MARKER,
   HARNESS_CLI_EXE,
-  CODEX_BINARY_IN_IMAGE,
+  WITH_CLAUDE_STAGE_BODY,
+  WITH_HARNESSES_STAGE_BODY,
   CODEX_VERSION,
   thinDockerfileFor,
   harnessProbeArgs,
@@ -206,16 +208,18 @@ function installNote(harnesses?: readonly string[]): string {
   return `installs ${parts.join(', ')}`;
 }
 
-const CODEX_REFRESH_DOCKERFILE = `ARG BASE_IMAGE
+function refreshDockerfile(harnesses?: readonly string[]): string {
+  const set = normalizeHarnesses(harnesses);
+  const nonClaude = set.includes('codex') || set.includes('antigravity');
+  return `ARG BASE_IMAGE
 FROM \${BASE_IMAGE}
-ARG CODEX_VERSION
-RUN npm install --global --ignore-scripts --no-audit --no-fund --prefix /opt/harnesses @openai/codex@\${CODEX_VERSION} && ${CODEX_BINARY_IN_IMAGE} --version | grep -Fx "codex-cli $CODEX_VERSION"
-`;
+${nonClaude ? WITH_HARNESSES_STAGE_BODY : ''}${set.includes('claude') ? WITH_CLAUDE_STAGE_BODY : ''}`;
+}
 
 export async function buildThinImage(
   d: StepDeps, version: string, harnesses?: readonly string[], refresh?: { previousImage: string; image: string },
 ): Promise<void> {
-  const note = refresh ? `installs Codex ${CODEX_VERSION}` : installNote(harnesses);
+  const note = refresh ? 'installs reviewed harness versions' : installNote(harnesses);
   d.report?.(`Building ${refresh?.image ?? localImageRef(version, harnesses)} (${note})`);
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const fs = require('fs/promises') as typeof import('fs/promises');
@@ -230,14 +234,18 @@ export async function buildThinImage(
       const contextPin = path.join(dir, 'sandbox');
       await fs.mkdir(contextPin);
       await fs.writeFile(path.join(contextPin, 'codex-version.json'), JSON.stringify(codexPin), 'utf8');
-      await fs.writeFile(path.join(dir, 'Dockerfile'), refresh ? CODEX_REFRESH_DOCKERFILE : thinDockerfileFor(harnesses), 'utf8');
+      await fs.writeFile(path.join(contextPin, 'harness-versions.json'), JSON.stringify(harnessPins), 'utf8');
+      await fs.writeFile(path.join(dir, 'Dockerfile'), refresh ? refreshDockerfile(harnesses) : thinDockerfileFor(harnesses), 'utf8');
     } catch (err) {
       throw new LocalDaemonError('build', `Writing the daemon Dockerfile failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     const dockerfilePath = path.join(dir, 'Dockerfile');
     const args = refresh ? [
       'build', '--tag', refresh.image, '--build-arg', `BASE_IMAGE=${refresh.previousImage}`,
-      '--build-arg', `CODEX_VERSION=${CODEX_VERSION}`, '--progress', 'plain', '-f', dockerfilePath, dir,
+      '--build-arg', `CODEX_VERSION=${CODEX_VERSION}`,
+      ...(harnesses?.includes('codex') ? ['--build-arg', 'INSTALL_CODEX=1'] : []),
+      ...(harnesses?.includes('antigravity') ? ['--build-arg', 'INSTALL_ANTIGRAVITY=1'] : []),
+      '--progress', 'plain', '-f', dockerfilePath, dir,
     ] : buildThinImageArgs({ version, dockerfilePath, contextDir: dir, harnesses });
     const r = await run(d, args, BUILD_TIMEOUT_MS, { chatty: true });
     if (r.exitCode !== 0) {
@@ -257,7 +265,7 @@ export async function verifyThinImage(d: StepDeps, version: string, harnesses?: 
   const r = await run(d, verifyImageArgs(version, harnesses, image), 60_000);
   if (r.exitCode !== 0 || !r.stdout.includes(VERIFY_OK_MARKER)) {
     throw failed('verify', image
-      ? `${image} did not report Codex ${CODEX_VERSION} with all enabled harnesses`
+      ? `${image} did not contain the reviewed harness versions`
       : `${localImageRef(version, harnesses)} was built but is missing ${[...normalizeHarnesses(harnesses).map((h) => HARNESS_CLI_EXE[h]), 'agent-threads', 'git'].join(', ')};`, r);
   }
 }

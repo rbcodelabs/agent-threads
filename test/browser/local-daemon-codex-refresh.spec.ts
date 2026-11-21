@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import path from 'path';
-import { CODEX_VERSION } from '../../src/localDaemon/spec';
+import { CODEX_VERSION, MANAGED_HARNESS_TARGETS } from '../../src/localDaemon/spec';
 
 test.use({ viewport: { width: 1280, height: 800 } });
 
@@ -32,3 +32,17 @@ test('Local daemon disables the harness update while work is active', async ({ p
   await expect(page.locator('.ct-local-daemon-hint')).toContainText('Wait for the daemon to finish active work');
   expect(await updates(page)).toEqual([]);
 });
+
+
+for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }, { width: 375, height: 667 }]) {
+  test(`previews both Claude and Antigravity at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto(`file://${path.resolve('test/harness/settings.html')}?localDaemonHarnesses=mixed`);
+    await page.getByLabel('Settings section').selectOption('remote');
+    await expect(page.locator('.ct-local-daemon-harness-claude')).toContainText('Claude 2.0.0');
+    await expect(page.locator('.ct-local-daemon-harness-antigravity')).toContainText('version unknown');
+    await page.getByRole('button', { name: 'Update harnesses' }).click();
+    await expect(page.getByText(`Claude from 2.0.0 to ${MANAGED_HARNESS_TARGETS.claude}, Antigravity from unknown to ${MANAGED_HARNESS_TARGETS.antigravity}`, { exact: false })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Continue', exact: true })).toBeVisible();
+  });
+}

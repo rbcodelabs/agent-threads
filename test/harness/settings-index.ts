@@ -5,7 +5,7 @@ import { mockApp } from './obsidian-mock';
 import { McpRegistrationModal } from '../../src/confirmModal';
 import { secretStorageKey } from '../../src/secretUtils';
 import { McpSyncEngine, type McpSyncTransport } from '../../src/remote/mcpSync';
-import { CODEX_VERSION } from '../../src/localDaemon/spec';
+import { CODEX_VERSION, MANAGED_HARNESS_TARGETS } from '../../src/localDaemon/spec';
 import { snap as localDaemonSnapshot } from '../helpers/localDaemonSnap';
 import type { CodexUpdatePreview } from '../../src/localDaemon/controller';
 
@@ -24,6 +24,23 @@ let harnessVersion = harnessStartingVersion;
 const harnessUpdates: CodexUpdatePreview[] = [];
 (window as any).__harnessUpdates = harnessUpdates;
 const readHarnessSnapshot = async () => {
+  if (harnessFixture === 'mixed') {
+    return localDaemonSnapshot({
+      harnessProbe: {
+        claude: { cli: true, signedIn: true, version: '2.0.0' },
+        antigravity: { cli: true, signedIn: true },
+      },
+    }, {
+      harnesses: ['claude', 'antigravity'],
+      codexUpdate: {
+        from: '2.0.0', to: MANAGED_HARNESS_TARGETS.claude, availability: 'idle',
+        versions: [
+          { harness: 'claude', from: '2.0.0', to: MANAGED_HARNESS_TARGETS.claude },
+          { harness: 'antigravity', from: 'unknown', to: MANAGED_HARNESS_TARGETS.antigravity },
+        ],
+      },
+    });
+  }
   if (harnessFixture !== 'idle' && harnessFixture !== 'busy') throw new Error('harness: no container runtime');
   const codexUpdate: CodexUpdatePreview | undefined = harnessVersion === harnessStartingVersion
     ? { from: harnessVersion, to: CODEX_VERSION, availability: harnessFixture } : undefined;

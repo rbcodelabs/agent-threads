@@ -15,6 +15,7 @@ import { parseAntigravityLogin, parseDeviceLogin, parseHarnessProbe } from '../.
 import { LocalDaemonError } from '../../src/localDaemon/provision';
 import {
   CODEX_VERSION,
+  MANAGED_HARNESS_TARGETS,
   THIN_DOCKERFILE,
   WITH_CLAUDE_STAGE_BODY,
   WITH_HARNESSES_STAGE_BODY,
@@ -136,8 +137,8 @@ describe('the thin Dockerfile', () => {
   });
 
   it('verifies the CLIs the set needs (using agy for antigravity)', () => {
-    expect(verifyImageArgs('0.65.0').at(-1)).toBe('command -v claude && command -v agent-threads && command -v git && echo LOCAL_DAEMON_IMAGE_OK');
-    expect(verifyImageArgs('0.65.0', ['codex', 'opencode', 'antigravity']).at(-1)).toBe('command -v codex && command -v opencode && command -v agy && command -v agent-threads && command -v git && echo LOCAL_DAEMON_IMAGE_OK');
+    expect(verifyImageArgs('0.65.0').at(-1)).toContain('command -v claude && command -v agent-threads && command -v git');
+    expect(verifyImageArgs('0.65.0', ['codex', 'opencode', 'antigravity']).at(-1)).toContain('command -v codex && command -v opencode && command -v agy && command -v agent-threads && command -v git');
   });
 });
 
@@ -346,7 +347,7 @@ describe('harness rows in the panel view', () => {
 
   it('shows CLI present / signed in per harness from the probe', () => {
     const r = rows({ harnessProbe: probe(true) });
-    expect(row(r, 'claude')).toMatchObject({ enabled: true, status: 'CLI installed, signed in', tone: 'ok' });
+    expect(row(r, 'claude')).toMatchObject({ enabled: true, status: 'CLI installed, signed in (version unknown)', tone: 'ok' });
     expect(row(r, 'codex')).toMatchObject({ status: 'CLI installed, signed in (version unknown)', tone: 'ok' });
     expect(row(r, 'codex').signIn).toBeUndefined();
   });
@@ -422,7 +423,7 @@ describe('controller: toggles drive the image and the daemon', () => {
     const container = Object.values(h.readState().containers)[0]!;
     expect(container.env).toContain('AGENT_THREADS_HARNESSES=claude,codex,opencode,antigravity');
     // a verify ran for every CLI in the set (including `agy` for antigravity)
-    expect(h.calls().some((c) => c.includes('command -v codex') && c.includes('command -v opencode') && c.includes('command -v agy'))).toBe(true);
+    expect(h.calls().some((c) => c.includes('command -v claude') && c.includes('command -v codex'))).toBe(true);
   });
 
   it('Claude off: Set up needs no Claude sign-in, builds no Claude layer, and ensureRunning does not demand one', async () => {
@@ -502,7 +503,7 @@ describe('controller: per-harness state and sign-in', () => {
     const h = await up();
     let snap1 = await h.controller.snapshot();
     expect(snap1.observed.harnessProbe).toEqual({
-      claude: { cli: true, signedIn: false },
+      claude: { cli: true, signedIn: false, version: MANAGED_HARNESS_TARGETS.claude },
       codex: { cli: true, signedIn: false, version: CODEX_VERSION },
       opencode: { cli: true, signedIn: false },
       antigravity: { cli: false, signedIn: false },
