@@ -9,6 +9,7 @@ import { shot } from './helpers';
 const kanbanUrl = 'file://' + path.resolve('test/harness/kanban.html');
 test.beforeEach(async ({ page }) => {
   await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
+  await page.route(/^https?:\/\//, (route) => route.abort('blockedbyclient'));
 });
 
 const DESKTOP = { width: 1280, height: 800 };
@@ -59,6 +60,24 @@ test.describe('orchestrator sheet — step 3 states (shared message renderer)', 
         await expect(sheet(page)).toBeVisible();
         await expect(page.locator('.ct-notice-row[data-role="notice"]')).toBeVisible();
         await expect(page.locator('.ct-tool-group-header').first()).toBeVisible();
+        await page.locator('.ct-orch-sheet-log').evaluate(async (el) => {
+          await Promise.all(
+            Array.from(el.querySelectorAll('img')).map((img) =>
+              img.complete
+                ? null
+                : new Promise<void>((resolve) => {
+                    img.addEventListener('load', () => resolve(), { once: true });
+                    img.addEventListener('error', () => resolve(), { once: true });
+                  }),
+            ),
+          );
+        });
+        await expect.poll(() =>
+          page.locator('.ct-orch-sheet-scroll').evaluate((el) => {
+            el.scrollTop = el.scrollHeight;
+            return el.scrollHeight - el.clientHeight - el.scrollTop;
+          }),
+        ).toBeLessThanOrEqual(1);
         await shot(page, `orchestrator-sheet-transcript-${theme}-${label}.png`, DOCK_SHOT);
       });
 
