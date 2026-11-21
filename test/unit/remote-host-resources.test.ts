@@ -3,7 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import {
-  HOST_RESOURCE_LIMITS, HOST_RESOURCE_TOOLS, HOST_TOOL_LIMITS, checkResourceUri, decodeResourceContents, decodeResourceList,
+  HOST_RESOURCE_LIMITS, HOST_RESOURCE_TOOLS, RESOURCE_TRUNCATION_MARKER, HOST_TOOL_LIMITS, checkResourceUri, decodeResourceContents, decodeResourceList,
   decodeResourceTemplates, encodeResourceContents, encodeResourceList, encodeResourceTemplates, isHostResourceTool, manifestFromSpecs,
 } from '../../src/protocol';
 import { HostToolExecutor, HostToolSlots } from '../../src/remote/hostToolExecutor';
@@ -40,8 +40,8 @@ describe('resource wire helpers', () => {
     const decoded = decodeResourceContents(encodeResourceContents([{ uri: 'u1', mimeType: 'text/markdown', text: '# Hi' }, { uri: 'u2', mimeType: 'image/png', blob: 'AAAA' }]));
     expect(decoded).toEqual({ ok: true, value: [{ uri: 'u1', mimeType: 'text/markdown', text: '# Hi' }, { uri: 'u2', mimeType: 'image/png', text: '[binary content (image/png) omitted: 3 bytes]' }] });
     const text = encodeResourceContents([{ uri: 'u', text: '"\n'.repeat(120_000) }]);
-    expect(text.length).toBeLessThanOrEqual(HOST_TOOL_LIMITS.maxResultTextChars);
-    expect(JSON.parse(text).contents[0].text).toContain('output truncated');
+    expect(text.length).toBeLessThanOrEqual(HOST_RESOURCE_LIMITS.maxReadTextChars);
+    expect(JSON.parse(text).contents[0].text).toContain('resource truncated');
   });
   it('rejects unreadable payloads and bad uris', () => {
     expect(decodeResourceList('not json').ok).toBe(false);
@@ -241,5 +241,75 @@ describe('host MCP server resources', () => {
     await expect(client.readResource({ uri: 'a\nb' })).rejects.toThrow('control characters');
     expect(call).not.toHaveBeenCalled();
     await client.close();
+  });
+});
+
+describe('resources/read size cap (TASK-93)', () => {
+  const READ = HOST_RESOURCE_LIMITS.maxReadTextChars;
+  const readText = (encoded: string) => (JSON.parse(encoded) as { contents: Array<{ text: string }> }).contents.map((c) => c.text);
+
+  it('is above the ordinary tool-result cap and well below the frame cap', () => {
+    expect(HOST_TOOL_LIMITS.maxResultTextChars).toBe(100_000);
+    expect(READ).toBeGreaterThan(250_000);
+    expect(READ).toBeLessThan(HOST_TOOL_LIMITS.maxResultFrameChars);
+  });
+  it('returns a 250K-char resource whole, through encode and decode', () => {
+    const html = '<p>x</p>'.repeat(31_250); // 250_000 chars
+    const decoded = decodeResourceContents(encodeResourceContents([{ uri: 'artifact://a', mimeType: 'text/html', text: html }]));
+    expect(decoded).toEqual({ ok: true, value: [{ uri: 'artifact://a', mimeType: 'text/html', text: html }] });
+  });
+  it('cuts a resource over the cap with a marker that says how to read the rest', () => {
+    const encoded = encodeResourceContents([{ uri: 'artifact://big', text: 'a'.repeat(READ + 50_000) }]);
+    expect(encoded.length).toBeLessThanOrEqual(READ);
+    const [text] = readText(encoded);
+    expect(text.endsWith(RESOURCE_TRUNCATION_MARKER)).toBe(true);
+    expect(RESOURCE_TRUNCATION_MARKER).toMatch(/offset\/length/);
+    const decoded = decodeResourceContents(encoded);
+    expect(decoded.ok && decoded.value[0].text.endsWith(RESOURCE_TRUNCATION_MARKER)).toBe(true);
+  });
+  it('splits the budget across several contents, leaving small ones whole', () => {
+    const encoded = encodeResourceContents([
+      { uri: 'u1', text: 'a'.repeat(READ) }, { uri: 'u2', text: 'small' }, { uri: 'u3', text: 'b'.repeat(READ) },
+    ]);
+    expect(encoded.length).toBeLessThanOrEqual(READ);
+    const [a, small, b] = readText(encoded);
+    expect(small).toBe('small');
+    expect(a).toContain('resource truncated');
+    expect(b).toContain('resource truncated');
+  });
+  it('keeps the omitted notice for blobs, with mimeType and byte size', () => {
+    const [note] = readText(encodeResourceContents([{ uri: 'u', mimeType: 'application/pdf', blob: 'A'.repeat(4_000) }]));
+    expect(note).toBe('[binary content (application/pdf) omitted: 3000 bytes]');
+  });
+  it('the executor and the broker let a 250K read through but still clamp ordinary results at 100K', async () => {
+    const big = encodeResourceContents([{ uri: 'artifact://a', text: 'z'.repeat(250_000) }]);
+    const plain = 'p'.repeat(250_000);
+    const results: Array<{ callId: string; text: string }> = [];
+    const ex = new HostToolExecutor({
+      manifest: () => manifestFromSpecs([spec('get_doc', 'compass')]),
+      invoke: async (_s, tool) => ({ success: true, text: tool === HOST_RESOURCE_TOOLS.read ? big : plain }),
+      requestPermission: async () => true, slots: new HostToolSlots(),
+      sendResult: async (callId, r) => { results.push({ callId, text: r.text }); },
+    });
+    ex.handleCall({ callId: 'r', threadId: 't', server: 'compass', tool: HOST_RESOURCE_TOOLS.read, input: { uri: 'artifact://a' } });
+    ex.handleCall({ callId: 'o', threadId: 't', server: 'compass', tool: 'get_doc', input: {} });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(results.find((r) => r.callId === 'r')?.text).toBe(big);
+    const ordinary = results.find((r) => r.callId === 'o')!.text;
+    expect(ordinary.length).toBeLessThan(110_000);
+    expect(ordinary).toContain('output truncated');
+
+    // Daemon side: same split, so the plugin's value is not cut again.
+    const broker = new HostToolBroker({ graceMs: 50, timeoutMs: 1000, emit: () => undefined, newId: (() => { let n = 0; return () => `id${++n}`; })() });
+    broker.setManifest('t', { compass: [spec('get_doc', 'compass')] }, 1);
+    broker.setSeatHolder('t', 1);
+    const read = broker.call('t', 'compass', HOST_RESOURCE_TOOLS.read, { uri: 'artifact://a' });
+    const tool = broker.call('t', 'compass', 'get_doc', {});
+    broker.resolve('t', 'id1', { success: true, text: big }, 'c');
+    broker.resolve('t', 'id2', { success: true, text: plain }, 'c');
+    expect((await read).text).toBe(big);
+    const clamped = (await tool).text;
+    expect(clamped.length).toBeLessThan(110_000);
+    expect(clamped).toContain('output truncated');
   });
 });

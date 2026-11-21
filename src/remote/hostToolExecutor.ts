@@ -16,7 +16,7 @@
  * A call id already seen is never run twice: a reopened call that finished gets its stored result re-sent, one
  * still running is left alone.
  */
-import { HOST_TOOL_LIMITS, checkCallInput, clampResultText, findManifestTool, isHostResourceTool, sanitizeResultContent, asStructuredContent, fitStructuredContent, type RemoteHostToolSpec } from '../protocol';
+import { HOST_RESOURCE_TOOLS, HOST_TOOL_LIMITS, checkCallInput, clampResourceText, clampResultText, findManifestTool, isHostResourceTool, sanitizeResultContent, asStructuredContent, fitStructuredContent, type RemoteHostToolSpec } from '../protocol';
 import type { HostToolOutput } from './hostTools';
 
 /** Calls in flight across all threads; one instance per plugin. */
@@ -188,7 +188,9 @@ export class HostToolExecutor {
       }
       if (abort.signal.aborted) { this.finish(callId, refusal(`The host tool "${spec.name}" was canceled before it finished.`)); return; }
       const out = await this.deps.invoke(spec.server, spec.name, input, abort.signal);
-      const clamped = clampResultText(out.text);
+      // A resources/read result is already bounded by its encoder to `maxReadTextChars`; clamping it at the
+      // ordinary tool-result cap here would cut the JSON mid-string and defeat the higher read cap.
+      const clamped = spec.name === HOST_RESOURCE_TOOLS.read ? clampResourceText(out.text) : clampResultText(out.text);
       // Same filter the daemon applies: images only, bounded in count and total size, so one large screenshot
       // cannot push the frame past the transport limit and loop on re-send.
       const sanitized = sanitizeResultContent(out.content);
