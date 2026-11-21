@@ -1,5 +1,6 @@
 import { gateHarness } from './remote/harnessSupport';
 import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
+import { resolveHarnessDefaultModel, resolveHarnessPermissionModeOverride } from './harnessSettings';
 import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, App, TFile, Platform } from 'obsidian';
 import { RemoteImageCache, createRemoteImageLoader } from './remote/remoteImages';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
@@ -1542,6 +1543,7 @@ export class ThreadsView extends ItemView {
       harnessPicker: {
         initialHarness: this.plugin.settings.agentHarness ?? 'claude',
         getModelOptions: (harness) => this.modelOptionsFor(harness),
+        getDefaultModel: (harness) => resolveHarnessDefaultModel(this.plugin.settings, harness),
         getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
         getDaemonCapabilities: (id) => this.plugin.daemonRegistry?.capabilitiesOf(id),
         getLocalUnavailable: (h) => this.plugin.localHarnessUnavailableReason(h),
@@ -3016,7 +3018,7 @@ export class ThreadsView extends ItemView {
     const escalated = thread ? this.escalatedTurnModels.get(thread.id) : undefined;
     return describeComposerSettings({
       harness: thread?.agentHarness,
-      model: escalated ?? thread?.model ?? undefined,
+      model: escalated ?? thread?.model ?? resolveHarnessDefaultModel(this.plugin.settings, thread?.agentHarness),
       activeModel: escalated ? undefined : thread?.activeModel,
       remote: remote ? { daemonName, connection } : undefined,
     });
@@ -3334,9 +3336,14 @@ export class ThreadsView extends ItemView {
   private selectedModelLabel(thread: import('./types').Thread | null | undefined): string {
     const escalated = thread ? this.escalatedTurnModels.get(thread.id) : undefined;
     if (escalated) return `${aliasLabel(escalated, this.plugin.discoveredModelsByHarness.claude)} (this turn)`;
-    const model = thread?.model ?? undefined;
-    if (!model) return 'Default';
     const harness = thread?.agentHarness ?? 'claude';
+    const model = thread?.model ?? undefined;
+    if (!model) {
+      const configuredDefault = resolveHarnessDefaultModel(this.plugin.settings, harness);
+      if (!configuredDefault) return 'Default';
+      const friendly = this.modelOptionsFor(harness).find((option) => option.value === configuredDefault)?.label ?? configuredDefault;
+      return `Default (${friendly})`;
+    }
     return this.modelOptionsFor(harness).find(option => option.value === model)?.label ?? model;
   }
 
@@ -3363,6 +3370,15 @@ export class ThreadsView extends ItemView {
 
   private currentPermissionLabel(): string {
     const mode = this.currentPermissionMode();
+    if (mode === undefined) {
+      const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
+      const harnessOverride = resolveHarnessPermissionModeOverride(this.plugin.settings, thread?.agentHarness);
+      if (harnessOverride) {
+        const overrideOpt = ThreadsView.PERMISSION_MODE_OPTIONS.find(o => o.value === harnessOverride);
+        return `Provider default (${overrideOpt?.label ?? harnessOverride})`;
+      }
+      return 'Global default';
+    }
     const opt = ThreadsView.PERMISSION_MODE_OPTIONS.find(o => o.value === mode);
     return opt?.label ?? 'Global default';
   }
@@ -6172,13 +6188,17 @@ export class ThreadsView extends ItemView {
         if (event.models.length > 0) {
           const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : undefined;
           const harness = thread?.agentHarness ?? 'claude';
-          const harnessModels = this.plugin.discoveredModelsByHarness[harness];
-          const existing = new Set(harnessModels.map((m) => m.value));
-          for (const m of event.models) {
-            if (!existing.has(m.value)) {
-              harnessModels.push(m);
-              if (harness === 'claude') this.plugin.discoveredModels.push(m);
-              existing.add(m.value);
+          if (typeof this.plugin.recordDiscoveredModels === 'function') {
+            this.plugin.recordDiscoveredModels(harness, event.models, 'merge');
+          } else {
+            const harnessModels = this.plugin.discoveredModelsByHarness[harness];
+            const existing = new Set(harnessModels.map((m) => m.value));
+            for (const m of event.models) {
+              if (!existing.has(m.value)) {
+                harnessModels.push(m);
+                if (harness === 'claude') this.plugin.discoveredModels.push(m);
+                existing.add(m.value);
+              }
             }
           }
         }

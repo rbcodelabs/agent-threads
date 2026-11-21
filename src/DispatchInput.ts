@@ -108,6 +108,8 @@ export interface DispatchInputOptions {
     initialHarness: AgentHarness;
     /** Models offered for a harness; `value: undefined` is the default. Omit to hide the Model row. */
     getModelOptions?: (harness: AgentHarness) => Array<{ label: string; value: string | undefined }>;
+    /** Configured default model for `harness` when no per-thread model is selected. */
+    getDefaultModel?: (harness: AgentHarness) => string | undefined;
     /** Configured remote daemons; when non-empty the popover offers a "Run on" row. */
     getRemoteDaemons?: () => RemoteDaemonConfig[];
     /**
@@ -646,7 +648,7 @@ export class DispatchInput {
     const runOn = this.effectiveRunOn();
     const d = describeComposerSettings({
       harness: this.selectedHarness,
-      model: undefined,
+      model: this.selectedModel ?? this.options.harnessPicker?.getDefaultModel?.(this.selectedHarness),
       activeModel: undefined,
       remote: runOn.daemonId ? { daemonName: runOn.daemonId, connection: 'pending' } : undefined,
     });

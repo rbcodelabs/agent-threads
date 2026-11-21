@@ -81,6 +81,13 @@ import { serializeThreadForSave } from './imageExternalization';
 import type { HostExecHooks } from './hostExec';
 import { mapLocalToRemote, mapRemoteToLocal } from './remote/vaultMapping';
 import { stripLegacySandboxSettings } from './legacySandboxVm';
+import {
+  migrateHarnessSettings,
+  normalizeCatalogEntries,
+  resolveDefaultPermissionMode,
+  updateCatalogEntries,
+  type CachedHarnessModel,
+} from './harnessSettings';
 import { selectIdleThreadsForArchive } from './autoArchive';
 import { createDeferredThreadArchiver } from './deferredThreadArchive';
 import { getVaultBridgesAPI, findBridgesForFiles, type BridgeInfo } from './bridgeUtils';
@@ -1361,6 +1368,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.googleWorkspaceMcp?.retainThreads(new Set(this.manager.getThreads().filter(thread => thread.status !== 'archived').map(thread => thread.id)));
       this.oauthMcpRegistry?.retainThreads(new Set(this.manager.getThreads().filter(thread => thread.status !== 'archived').map(thread => thread.id)));
     }));
+    this.register(this.manager.subscribe((threadId, event) => {
+      if (event.type !== 'capabilities_discovered' || event.models.length === 0) return;
+      const harness = this.manager.getThread(threadId)?.agentHarness ?? 'claude';
+      this.recordDiscoveredModels(harness, event.models, 'merge');
+    }));
 
     // AgentRun state is a crash-recovery record, so persist every lifecycle
     // projection while the parent turn is still active. Waiting for done/error
@@ -2275,7 +2287,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Scheduled sessions should not block on permission prompts. When the
     // global permissionMode is 'default' (ask every time), override to
     // 'dontAsk' so unattended runs complete without hanging.
-    if (!thread.permissionMode && this.settings.permissionMode === 'default') {
+    if (!thread.permissionMode && resolveDefaultPermissionMode(this.settings, thread.agentHarness) === 'default') {
       thread.permissionMode = 'dontAsk';
     }
     // Record the scheduled item that created this thread, for the
@@ -3458,7 +3470,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       agentTools: this.agentTools,
       helpProviders: this.helpProviders,
       slashCommands: this.slashCommands,
-      getDefaultPermissionMode: () => this.settings.permissionMode,
+      getDefaultPermissionMode: (harness) => resolveDefaultPermissionMode(this.settings, harness),
       artifactStore: createArtifactStore({
         vaultRoot: () => this.manager.vaultRoot,
         getThread: (id) => this.manager.getThread(id),
@@ -3839,12 +3851,55 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return promise;
   }
 
-  /** Problems to surface in Settings and the model menu; empty when healthy or not applicable. */
+    /** Problems to surface in Settings and the model menu; empty when healthy or not applicable. */
   getClaudeCliProblems(): CliProblem[] {
     if (Platform.isMobile) return [];
     const info = this.claudeCliInfo?.binaryPath === this.settings.claudeBinaryPath ? this.claudeCliInfo : undefined;
     const missing = findMissingKnownModels(this.discoveredModelsByHarness.claude, Object.values(FALLBACK_RESOLVED));
     return describeCliProblems(info, missing);
+  }
+
+  /**
+   * Records discovered models for `harness` in memory and persists them under
+   * `settings.discoveredModelsCache` when the catalog actually changed.
+   */
+  recordDiscoveredModels(
+    harness: AgentHarness,
+    models: ReadonlyArray<{ value?: unknown; displayName?: unknown; description?: unknown; resolvedModel?: unknown }>,
+    mode: 'merge' | 'replace' = 'merge',
+  ): boolean {
+    const current = this.discoveredModelsByHarness[harness] ?? [];
+    const { entries, changed } = updateCatalogEntries(current as unknown as CachedHarnessModel[], models, mode);
+    if (!changed && current.length === entries.length) return false;
+    const sdkShaped = entries.map((m) => ({
+      value: m.value,
+      displayName: m.displayName,
+      description: m.description ?? '',
+      ...(m.resolvedModel ? { resolvedModel: m.resolvedModel } : {}),
+    })) as import('@anthropic-ai/claude-agent-sdk').ModelInfo[];
+    this.discoveredModelsByHarness[harness] = sdkShaped;
+    if (harness === 'claude') this.discoveredModels = [...sdkShaped];
+    this.settings.discoveredModelsCache = {
+      ...(this.settings.discoveredModelsCache ?? {}),
+      [harness]: entries,
+    };
+    if (changed) void this.saveSettings().catch(console.error);
+    return changed;
+  }
+
+  /**
+   * Probes the local CLI for `harness` on demand (Settings → Agent → "Refresh models")
+   * and replaces its cached model catalog. Desktop-only.
+   */
+  async refreshHarnessModels(harness: AgentHarness): Promise<CachedHarnessModel[]> {
+    if (Platform.isMobile) return [];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { probeHarnessModels } = require('./harnessModelProbe') as typeof import('./harnessModelProbe');
+    const models = await probeHarnessModels(harness, this.settings, this.getEffectiveCwd());
+    if (models.length > 0) {
+      this.recordDiscoveredModels(harness, models, 'replace');
+    }
+    return models;
   }
 
   private detectClaudeBinary(): void {
@@ -4709,6 +4764,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
     if (storedKey && !storedKey.startsWith('sk-')) {
       this.app.secretStorage.setSecret('openai-api-key', '');
     }
+
+    // Migrate legacy single defaultModel to per-harness defaults and hydrate cached model catalogs.
+    migrateHarnessSettings(this.settings);
+    const cachedCatalogs = this.settings.discoveredModelsCache ?? {};
+    for (const harness of ['claude', 'codex', 'opencode', 'antigravity'] as const) {
+      const entries = normalizeCatalogEntries(cachedCatalogs[harness]);
+      this.discoveredModelsByHarness[harness] = entries.map((m) => ({
+        value: m.value,
+        displayName: m.displayName,
+        description: m.description ?? '',
+        ...(m.resolvedModel ? { resolvedModel: m.resolvedModel } : {}),
+      })) as import('@anthropic-ai/claude-agent-sdk').ModelInfo[];
+    }
+    this.discoveredModels = [...this.discoveredModelsByHarness.claude];
   }
 
   /**

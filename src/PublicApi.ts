@@ -289,7 +289,7 @@ export interface PublicApiDependencies {
   helpProviders?: HelpProviderRegistry;
   slashCommands?: SlashCommandRegistry;
   /** Default permission mode, for resolving a thread with no override. */
-  getDefaultPermissionMode?(): Thread['permissionMode'];
+  getDefaultPermissionMode?(harness?: Thread['agentHarness']): Thread['permissionMode'];
   /** Host-owned artifact persistence; absent when the host cannot store artifacts. */
   artifactStore?: ArtifactStoreHost;
 }
@@ -947,7 +947,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     const override = thread.permissionMode;
     return freeze({
       threadId,
-      effectivePermissionMode: override ?? deps.getDefaultPermissionMode() ?? 'default',
+      effectivePermissionMode: override ?? deps.getDefaultPermissionMode(thread.agentHarness) ?? 'default',
       overridden: override !== undefined,
       planApprovalPending: thread.pendingPlan !== undefined,
       questionPending: (thread.pendingQuestions?.length ?? 0) > 0,

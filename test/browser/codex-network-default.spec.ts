@@ -15,6 +15,7 @@ for (const [width, height] of [[1280, 800], [390, 844], [375, 667]]) {
       document.querySelector<HTMLElement>('#app')!.style.width = 'min(760px, 100vw)';
     });
     await page.getByLabel('Settings section').selectOption('claude');
+    await page.getByRole('tab', { name: /OpenAI Codex/ }).click();
     const setting = page.locator('.setting-item').filter({ hasText: 'Codex network access default' });
     const toggle = setting.locator('.checkbox-container');
     await expect(toggle).not.toHaveClass(/is-enabled/);
