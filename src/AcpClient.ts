@@ -10,6 +10,8 @@
  * so importing this file stays inert on mobile, and tests inject a launcher instead of spawning a process.
  */
 
+import { processGroupSpawnOptions, terminateProcessTree } from './processTree';
+
 /** The wire to one agent process. Tests substitute a fake; production spawns a child process. */
 export interface AcpChannel {
   /** Write one already-serialized message; the channel appends the newline. */
@@ -66,6 +68,7 @@ export const spawnAcpChannel: AcpLauncher = (options) => {
     cwd: options.cwd,
     env: options.env as NodeJS.ProcessEnv,
     stdio: ['pipe', 'pipe', 'pipe'],
+    ...processGroupSpawnOptions(),
   });
   let exitHandler: ((info: { code: number | null; signal: string | null; error?: Error }) => void) | undefined;
   let exited = false;
@@ -87,10 +90,7 @@ export const spawnAcpChannel: AcpLauncher = (options) => {
     onExit: (handler) => { exitHandler = handler; if (exited) handler({ code: null, signal: null }); },
     kill: () => {
       if (exited) return;
-      child.kill('SIGTERM');
-      // Never leave an orphaned agent behind if SIGTERM is ignored.
-      const escalate = setTimeout(() => { if (!exited) child.kill('SIGKILL'); }, KILL_ESCALATION_MS);
-      (escalate as { unref?: () => void }).unref?.();
+      void terminateProcessTree(child, { graceMs: KILL_ESCALATION_MS });
     },
   };
 };

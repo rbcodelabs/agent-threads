@@ -30,6 +30,7 @@
  * mobile, where HarnessFactory is never reached.
  */
 import type { ChildProcess } from 'child_process';
+import { processGroupSpawnOptions, terminateProcessTree } from './processTree';
 import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
 import type { AgentHarness, AskQuestion, ImageAttachment, TaskItemStatus } from './types';
 import { parseExtraEnv } from './types';
@@ -481,13 +482,14 @@ export const launchOpenCodeServer: OpenCodeLauncher = async ({ binaryPath, cwd, 
     cwd,
     env: { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify(expected === 'v2' ? (configV2 ?? config) : config) },
     stdio: ['ignore', 'pipe', 'pipe'],
+    ...processGroupSpawnOptions(),
   });
   const started = await new Promise<{ baseUrl: string; password?: string }>((resolve, reject) => {
     let output = '';
     let settled = false;
     const finish = (action: () => void) => { if (settled) return; settled = true; clearTimeout(timer); if (grace) clearTimeout(grace); action(); };
     const timer = setTimeout(() => {
-      finish(() => { child.kill(); reject(new Error(`opencode serve did not start within ${SERVER_START_TIMEOUT_MS / 1000}s`)); });
+      finish(() => { void terminateProcessTree(child); reject(new Error(`opencode serve did not start within ${SERVER_START_TIMEOUT_MS / 1000}s`)); });
     }, SERVER_START_TIMEOUT_MS);
     let grace: ReturnType<typeof setTimeout> | undefined;
     const check = (final: boolean) => {
@@ -512,7 +514,7 @@ export const launchOpenCodeServer: OpenCodeLauncher = async ({ binaryPath, cwd, 
     // The config was shaped for the other generation, which the server silently
     // ignores; its default policy would then run tools without asking. Refuse
     // rather than continue unprotected.
-    child.kill();
+    void terminateProcessTree(child);
     throw new Error(`\`${binaryPath} --version\` ${detected ? `reported OpenCode ${detected}` : 'could not be read'}, but the server speaks the ${generation} API.${openCodeCompatibilityHint()}`);
   }
   const { baseUrl, password } = started;
@@ -581,14 +583,7 @@ export const launchOpenCodeServer: OpenCodeLauncher = async ({ binaryPath, cwd, 
       closed = true;
       eventRequest?.destroy();
       eventRequest = null;
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill('SIGTERM');
-        // Never leave an orphaned server behind if SIGTERM is ignored.
-        const escalate = setTimeout(() => {
-          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-        }, 3000);
-        (escalate as { unref?: () => void }).unref?.();
-      }
+      void terminateProcessTree(child);
     },
   };
 };
