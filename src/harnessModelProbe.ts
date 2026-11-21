@@ -11,6 +11,7 @@ import { AcpClient, type AcpLauncher } from './AcpClient';
 import { ANTIGRAVITY_INSTALL_HINT, antigravityModels } from './AntigravitySession';
 import { normalizeCatalogEntries, type CachedHarnessModel } from './harnessSettings';
 import { launchOpenCodeServer, type OpenCodeLauncher } from './OpenCodeSession';
+import { createClaudeProcessGroupSpawner, processGroupSpawnOptions, terminateProcessTree } from './processTree';
 import { effectiveExtraEnv, parseExtraEnv, type AgentHarness, type PluginSettings } from './types';
 
 const DEFAULT_PROBE_TIMEOUT_MS = 20_000;
@@ -75,6 +76,7 @@ export async function probeClaudeModels(
       persistSession: false,
       ...(settings.claudeBinaryPath ? { pathToClaudeCodeExecutable: settings.claudeBinaryPath } : {}),
       env: buildProbeEnv(settings, deps.env),
+      spawnClaudeCodeProcess: createClaudeProcessGroupSpawner(),
     },
   });
 
@@ -101,7 +103,12 @@ export async function probeCodexModels(
   const spawnFn = deps.codexSpawn ?? ((cmd, args, opts) => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { spawn } = require('child_process') as typeof import('child_process');
-    return spawn(cmd, args, { cwd: opts.cwd, env: opts.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    return spawn(cmd, args, {
+      cwd: opts.cwd,
+      env: opts.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      ...processGroupSpawnOptions(),
+    });
   });
 
   const child = spawnFn(binary, ['app-server'], { cwd, env });
@@ -183,11 +190,11 @@ export async function probeCodexModels(
   try {
     return await withTimeout(run(), timeoutMs, 'Codex model discovery', () => {
       closed = true;
-      try { child.kill(); } catch { /* ignore */ }
+      try { void terminateProcessTree(child); } catch { /* ignore */ }
     });
   } finally {
     closed = true;
-    try { child.kill(); } catch { /* ignore */ }
+    try { void terminateProcessTree(child); } catch { /* ignore */ }
   }
 }
 

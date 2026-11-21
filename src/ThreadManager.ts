@@ -191,6 +191,9 @@ export class ThreadManager {
    * "busy right now" from "warm but idle."
    */
   private sessions: Map<string, HarnessSession> = new Map();
+  /** Last activity timestamp (ms) for each live session in `this.sessions`, used by the idle reaper and LRU cap. */
+  private sessionLastActiveAt: Map<string, number> = new Map();
+  private idleReaperTimer: ReturnType<typeof setInterval> | null = null;
   private codexNetworkUpdateTails = new Map<string, Promise<void>>();
   /** Threads whose live session must be rebuilt at the next safe turn boundary (see requestSessionRestart). */
   private sessionRestartRequested = new Set<string>();
@@ -819,7 +822,7 @@ export class ThreadManager {
       }
       const oldSession = this.sessions.get(id);
       if (oldSession) oldSession.close();
-      this.sessions.delete(id);
+      this.deleteSession(id);
       this.selectedAgentRuns.delete(id);
       this.emit(id, { type: 'harness_changed', sourceHarness, targetHarness });
     } catch (error) {
@@ -899,7 +902,7 @@ export class ThreadManager {
       if (this.threads.get(id) !== thread) throw new Error('Thread was deleted while the move was being saved.');
       const oldSession = this.sessions.get(id);
       if (oldSession) oldSession.close();
-      this.sessions.delete(id);
+      this.deleteSession(id);
       this.selectedAgentRuns.delete(id);
       this.emit(id, { type: 'harness_changed', sourceHarness: harness, targetHarness: harness });
     } catch (error) {
@@ -1086,14 +1089,14 @@ export class ThreadManager {
       const options = this.buildThreadSessionOptions(id, thread, undefined, false);
       if (!options) continue;
       thread.status = 'active';
-      this.sessions.set(id, session);
+      this.registerSession(id, session, true);
       this.emit(id, { type: 'streaming_start' });
       resumed.push(id);
       session.start(options, { attachOnly: true }).catch((err: unknown) => {
         const error = err instanceof Error ? err : new Error(String(err));
         thread.status = 'error';
         thread.lastError = error.message;
-        if (this.sessions.get(id) === session) this.sessions.delete(id);
+        this.deleteSession(id, session);
         this.emit(id, { type: 'error', error });
       });
     }
@@ -1154,7 +1157,7 @@ export class ThreadManager {
     const session = this.sessions.get(id);
     if (session) {
       session.close();
-      this.sessions.delete(id);
+      this.deleteSession(id);
     }
     this.cancelPendingGoalContext(id);
     this.pendingToolResultImages.delete(id);
@@ -1984,7 +1987,7 @@ export class ThreadManager {
     const oldSession = this.sessions.get(threadId);
     if (oldSession) {
       oldSession.close();
-      this.sessions.delete(threadId);
+      this.deleteSession(threadId);
     }
     this.selectedAgentRuns.delete(threadId);
     if (thread.status === 'active' || thread.status === 'reconnecting' || thread.status === 'error') {
@@ -2113,7 +2116,7 @@ export class ThreadManager {
     try {
       if (session) {
         session.close();
-        this.sessions.delete(threadId);
+        this.deleteSession(threadId);
       }
       state.refreshRequested = false;
 
@@ -2179,10 +2182,10 @@ export class ThreadManager {
     let session = this.sessions.get(threadId);
     if (!session) {
       session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread, goalLaunch), process.env, goalLaunch);
-      this.sessions.set(threadId, session);
+      this.registerSession(threadId, session, !!thread.remote);
       const options = this.buildThreadSessionOptions(threadId, thread, undefined, false);
       if (!options) {
-        this.sessions.delete(threadId);
+        this.deleteSession(threadId, session);
         return false;
       }
       try {
@@ -2195,15 +2198,17 @@ export class ThreadManager {
           || state.desiredRevision !== revision
         ) {
           session.close();
-          if (this.sessions.get(threadId) === session) this.sessions.delete(threadId);
+          this.deleteSession(threadId, session);
           return false;
         }
         thread.status = 'error';
         thread.lastError = error.message;
         this.emit(threadId, { type: 'error', error });
-        this.sessions.delete(threadId);
+        this.deleteSession(threadId, session);
         throw error;
       }
+    } else {
+      this.touchSessionActivity(threadId);
     }
 
     if (
@@ -2212,7 +2217,7 @@ export class ThreadManager {
       || state.desiredRevision !== revision
     ) {
       session.close();
-      if (this.sessions.get(threadId) === session) this.sessions.delete(threadId);
+      this.deleteSession(threadId, session);
       return false;
     }
 
@@ -2228,7 +2233,7 @@ export class ThreadManager {
       || state.desiredRevision !== revision
     ) {
       session.close();
-      if (this.sessions.get(threadId) === session) this.sessions.delete(threadId);
+      this.deleteSession(threadId, session);
       return false;
     }
 
@@ -2274,7 +2279,7 @@ export class ThreadManager {
     const session = this.sessions.get(threadId);
     if (session) {
       session.close();
-      this.sessions.delete(threadId);
+      this.deleteSession(threadId);
     }
     await this.sendMessage(threadId, pending.content, pending.images, true);
     return true;
@@ -2397,7 +2402,7 @@ export class ThreadManager {
     }
     if (session && (cwdChanged || restartRequested) && !session.turnInFlight) {
       session.close();
-      this.sessions.delete(threadId);
+      this.deleteSession(threadId);
       session = undefined;
     }
     if (!session) this.sessionRestartRequested.delete(threadId);
@@ -2405,9 +2410,11 @@ export class ThreadManager {
     if (!session) {
       // The last-resort synchronous guard, fed by the snapshot read at the top of this call.
       session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread, launchPolicy), process.env, launchPolicy);
-      this.sessions.set(threadId, session);
+      this.registerSession(threadId, session, !!thread.remote);
       const goalState = this.getGoalContextState(threadId);
       goalState.appliedRevision = goalState.desiredRevision;
+    } else {
+      this.touchSessionActivity(threadId);
     }
 
     this.emit(threadId, { type: 'streaming_start' });
@@ -2465,7 +2472,7 @@ export class ThreadManager {
         thread.status = 'error';
         thread.lastError = error.message;
         this.emit(threadId, { type: 'error', error });
-        this.sessions.delete(threadId);
+        this.deleteSession(threadId, session);
         if (claimedHandoff) this.releaseHarnessHandoffClaim(threadId);
         return;
       }
@@ -2943,6 +2950,7 @@ export class ThreadManager {
       },
       onToken: (text) => {
         if (!isCurrentGeneration()) return;
+        this.touchSessionActivity(threadId);
         this.clearReconnectingStatus(thread);
         this.emit(threadId, { type: 'token', text });
       },
@@ -2958,6 +2966,7 @@ export class ThreadManager {
       },
       onToolUse: (record) => {
         if (!isCurrentGeneration()) return;
+        this.touchSessionActivity(threadId);
         this.threadActivity.set(threadId, record.summary);
         // Persist file paths for Write/Edit tools so they survive tab switches.
         if (record.name === 'Write' || record.name === 'Edit') {
@@ -2988,6 +2997,7 @@ export class ThreadManager {
       },
       onMessage: (content, toolCalls) => {
         if (!isCurrentGeneration()) return;
+        this.touchSessionActivity(threadId);
         this.clearReconnectingStatus(thread);
         const images = this.pendingToolResultImages.get(threadId);
         const assistantMsg: ChatMessage = {
@@ -3015,6 +3025,7 @@ export class ThreadManager {
       },
       onDone: (sessionId, cost, _numTurns, metadata) => {
         if (!isCurrentGeneration()) return;
+        this.touchSessionActivity(threadId);
         // Only persist this sessionId if the cwd hasn't changed since this
         // session was opened. setThreadCwd() (enter_worktree /
         // set_working_directory) clears thread.sessionId and defers the
@@ -3098,6 +3109,7 @@ export class ThreadManager {
       },
       onInterrupted: (_sessionId) => {
         if (!isCurrentGeneration()) return;
+        this.touchSessionActivity(threadId);
         this.releaseHarnessHandoffClaim(threadId);
         // Roll back every orphaned, unresolved user message — not just the
         // trailing one. Under the old per-turn model, sendMessage() gated on
@@ -3128,6 +3140,7 @@ export class ThreadManager {
       },
       onError: (err) => {
         if (!isCurrentGeneration()) return;
+        this.touchSessionActivity(threadId);
         this.releaseHarnessHandoffClaim(threadId);
         // Safety net: always clean up a pending plan card here, mirroring
         // the onDone safety net above — otherwise an errored session (e.g.
@@ -3876,8 +3889,142 @@ export class ThreadManager {
       this.releaseSession(session);
     }
     this.sessions.clear();
+    this.sessionLastActiveAt.clear();
 
     return { timedOut };
+  }
+
+  /** Record activity for a live session so the idle reaper and LRU cap track recency. */
+  private touchSessionActivity(threadId: string, now = this.now()): void {
+    if (this.sessions.has(threadId)) {
+      this.sessionLastActiveAt.set(threadId, now);
+    }
+  }
+
+  /** Register a live session, stamp its activity time, and enforce the local live-session LRU cap. */
+  private registerSession(threadId: string, session: HarnessSession, isRemote: boolean): void {
+    this.sessions.set(threadId, session);
+    this.sessionLastActiveAt.set(threadId, this.now());
+    if (!isRemote) {
+      this.enforceLiveSessionCap(threadId);
+    }
+  }
+
+  /** Remove a session from the live map and clear its activity timestamp. */
+  private deleteSession(threadId: string, expectedSession?: HarnessSession): void {
+    if (expectedSession && this.sessions.get(threadId) !== expectedSession) return;
+    this.sessions.delete(threadId);
+    this.sessionLastActiveAt.delete(threadId);
+  }
+
+  /**
+   * Start the periodic idle-session sweep timer (default 60 s).
+   *
+   * A periodic sweep is required here because none of the underlying harness
+   * SDKs/CLIs (Claude, Codex, Antigravity, OpenCode) provide a native idle
+   * timeout that tears down warm subprocesses and their child MCP trees.
+   */
+  startIdleReaper(intervalMs = 60_000): void {
+    if (this.idleReaperTimer) return;
+    this.idleReaperTimer = setInterval(() => {
+      this.reapIdleSessions();
+    }, intervalMs);
+    (this.idleReaperTimer as { unref?: () => void }).unref?.();
+  }
+
+  /** Stop the periodic idle-session sweep timer. Safe to call repeatedly. */
+  stopIdleReaper(): void {
+    if (!this.idleReaperTimer) return;
+    clearInterval(this.idleReaperTimer);
+    this.idleReaperTimer = null;
+  }
+
+  private isSessionEligibleForIdleReap(threadId: string, session: HarnessSession): boolean {
+    const thread = this.threads.get(threadId);
+    if (thread?.remote) return false;
+    if (typeof session.canIdleReap !== 'function' || !session.canIdleReap()) return false;
+    if (session.turnInFlight) return false;
+    if (session.hasPendingPermission) return false;
+    if (this.pendingPermissions.has(threadId)) return false;
+    if (this.permissionResolvers.has(threadId)) return false;
+    if (this.pendingQuestionResolvers.has(threadId)) return false;
+    if (this.pendingPlanResolvers.has(threadId)) return false;
+    if (this.remotePermissionResolvers.has(threadId)) return false;
+    if (this.remoteQuestionResolvers.has(threadId)) return false;
+    if (this.hasActiveBackgroundTasks(threadId)) return false;
+    return true;
+  }
+
+  private reapSession(threadId: string, session: HarnessSession, reason: 'idle' | 'lru'): void {
+    const thread = this.threads.get(threadId);
+    const harness = thread?.agentHarness ?? 'claude';
+    try {
+      session.close();
+    } catch (err) {
+      console.warn(`[ClaudeThreads] Error closing reaped session for thread ${threadId}:`, err);
+    }
+    // Preserve thread.sessionId so the next turn cold-resumes seamlessly.
+    this.deleteSession(threadId, session);
+    console.log(`[ClaudeThreads] Reaped ${reason} session for thread ${threadId} (${harness})`);
+  }
+
+  /**
+   * Reap eligible idle local sessions past `idleReapMinutes` (Pass 1) and
+   * enforce the `maxLiveSessions` LRU cap across remaining local sessions
+   * (Pass 2). Remote sessions and active/protected sessions are never touched.
+   */
+  reapIdleSessions(now = this.now()): number {
+    let reaped = 0;
+    const idleMinutes = this.settings.idleReapMinutes ?? 15;
+    if (idleMinutes > 0) {
+      const idleMs = idleMinutes * 60_000;
+      for (const [threadId, session] of [...this.sessions.entries()]) {
+        if (!this.isSessionEligibleForIdleReap(threadId, session)) continue;
+        const thread = this.threads.get(threadId);
+        const lastActiveAt = this.sessionLastActiveAt.get(threadId) ?? thread?.updatedAt ?? 0;
+        if (now - lastActiveAt >= idleMs) {
+          this.reapSession(threadId, session, 'idle');
+          reaped++;
+        }
+      }
+    }
+    reaped += this.enforceLiveSessionCap();
+    return reaped;
+  }
+
+  /**
+   * Evict oldest eligible idle local sessions when the total count of live
+   * local sessions exceeds `maxLiveSessions`. Never evicts protected/active
+   * sessions or `excludeThreadId`.
+   */
+  private enforceLiveSessionCap(excludeThreadId?: string): number {
+    const maxLive = this.settings.maxLiveSessions ?? 4;
+    if (maxLive <= 0) return 0;
+
+    let liveLocalCount = 0;
+    const eligible: Array<{ threadId: string; session: HarnessSession; lastActiveAt: number }> = [];
+    for (const [threadId, session] of this.sessions.entries()) {
+      const thread = this.threads.get(threadId);
+      if (thread?.remote) continue;
+      liveLocalCount++;
+      if (threadId === excludeThreadId) continue;
+      if (!this.isSessionEligibleForIdleReap(threadId, session)) continue;
+      const lastActiveAt = this.sessionLastActiveAt.get(threadId) ?? thread?.updatedAt ?? 0;
+      eligible.push({ threadId, session, lastActiveAt });
+    }
+
+    if (liveLocalCount <= maxLive) return 0;
+    eligible.sort((a, b) => a.lastActiveAt - b.lastActiveAt);
+
+    let reaped = 0;
+    let excess = liveLocalCount - maxLive;
+    for (const entry of eligible) {
+      if (excess <= 0) break;
+      this.reapSession(entry.threadId, entry.session, 'lru');
+      reaped++;
+      excess--;
+    }
+    return reaped;
   }
 
   /**
@@ -3891,11 +4038,13 @@ export class ThreadManager {
   }
 
   destroy(): void {
+    this.stopIdleReaper();
     for (const threadId of this.goalContextStates.keys()) this.cancelPendingGoalContext(threadId);
     for (const session of this.sessions.values()) {
       this.releaseSession(session);
     }
     this.sessions.clear();
+    this.sessionLastActiveAt.clear();
     this.releasingPlanFeedback.clear();
   }
 }

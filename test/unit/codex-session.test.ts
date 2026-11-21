@@ -1424,3 +1424,113 @@ describe('CodexSession protocol notifications', () => {
     expect(session.turnInFlight).toBe(false);
   });
 });
+
+describe('CodexSession — canIdleReap and process-group SIGKILL escalation', () => {
+  it('tracks pending permission requests in hasPendingPermission and canIdleReap()', async () => {
+    const session = new CodexSession('codex') as any;
+    let resolvePermission!: (allow: boolean) => void;
+    const onPermissionRequest = vi.fn(() => new Promise<boolean>((resolve) => { resolvePermission = resolve; }));
+    session.options = { callbacks: { onPermissionRequest }, permissionMode: 'default' };
+    session.codexThreadId = 'thread-1';
+    session.closed = false;
+    const respond = vi.spyOn(session, 'respond').mockImplementation(() => {});
+
+    expect(session.hasPendingPermission).toBe(false);
+    expect(session.canIdleReap()).toBe(true);
+
+    session.handle({
+      id: 42,
+      method: 'item/commandExecution/requestApproval',
+      params: { command: 'rm -rf /tmp/foo' },
+    });
+
+    expect(session.hasPendingPermission).toBe(true);
+    expect(session.canIdleReap()).toBe(false);
+
+    resolvePermission(true);
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledWith(42, { decision: 'accept' }));
+
+    expect(session.hasPendingPermission).toBe(false);
+    expect(session.canIdleReap()).toBe(true);
+  });
+
+  it('returns false from canIdleReap() while a question request is pending and true once resolved', async () => {
+    const session = new CodexSession('codex') as any;
+    let resolveQuestion!: (answers: Record<string, string>) => void;
+    const onAskUserQuestion = vi.fn(() => new Promise<Record<string, string>>((resolve) => { resolveQuestion = resolve; }));
+    session.options = { callbacks: { onAskUserQuestion }, permissionMode: 'default' };
+    session.codexThreadId = 'thread-1';
+    session.closed = false;
+    session._turnInFlight = true;
+    session.activeTurnId = 'turn-1';
+    const respond = vi.spyOn(session, 'respond').mockImplementation(() => {});
+
+    session.handle({
+      id: 77,
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        isBlocking: true,
+        questions: [{ id: 'q1', question: 'Continue?', options: [{ label: 'Yes', description: '' }] }],
+      },
+    });
+
+    // Even if _turnInFlight drops while a question is still tracked, canIdleReap() must remain false.
+    session._turnInFlight = false;
+    expect(session.canIdleReap()).toBe(false);
+
+    resolveQuestion({ q1: 'Yes' });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledWith(77, { answers: { q1: { answers: ['Yes'] } } }));
+
+    expect(session.canIdleReap()).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'close() escalates to SIGKILL when the child process ignores SIGTERM',
+    async () => {
+      const { spawn } = await import('child_process');
+      const { processGroupSpawnOptions } = await import('../../src/processTree');
+      const child = spawn(
+        process.execPath,
+        ['-e', "process.on('SIGTERM', () => {}); process.stdout.write('READY\\n'); setInterval(() => {}, 10000);"],
+        { stdio: ['pipe', 'pipe', 'pipe'], ...processGroupSpawnOptions() },
+      );
+
+      await new Promise<void>((resolve, reject) => {
+        let buf = '';
+        const timer = setTimeout(() => reject(new Error('Timed out waiting for READY')), 5000);
+        child.stdout.on('data', (chunk: Buffer) => {
+          buf += chunk.toString('utf8');
+          if (buf.includes('READY')) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+        child.once('error', (err) => { clearTimeout(timer); reject(err); });
+      });
+
+      const session = new CodexSession('codex', 150) as any;
+      session.closed = false;
+      session.process = child;
+
+      try {
+        const exitPromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+          child.once('exit', (code, signal) => resolve({ code, signal }));
+        });
+
+        const startedAt = Date.now();
+        session.close();
+        const result = await exitPromise;
+        const elapsed = Date.now() - startedAt;
+
+        expect(elapsed).toBeLessThan(2000);
+        expect(result.signal).toBe('SIGKILL');
+      } finally {
+        if (child.pid) {
+          try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+        }
+      }
+    },
+  );
+});

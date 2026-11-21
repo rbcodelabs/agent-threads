@@ -709,6 +709,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       new AttachmentWriter(() => this.app, () => this.settings.vaultFolder),
       canvasThumbnailGenerator,
     );
+    this.manager.startIdleReaper();
+    this.register(() => this.manager?.stopIdleReaper());
     // Remote daemons: one client per configured daemon, tokens read from the keychain at each (re)connect.
     this.daemonRegistry = new DaemonRegistry({
       getDaemons: () => this.settings.remoteDaemons ?? [],
@@ -3336,6 +3338,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // independently fire the same due item. Destroying synchronously here closes
     // that race window immediately, regardless of how long thread shutdown takes.
     this.scheduler?.destroy();
+    this.manager?.stopIdleReaper();
     // Same reasoning as the scheduler: every agent browser guest is a live
     // renderer process, and this must not wait for the gracefulShutdown poll
     // below. register() already covers the normal unload path; this is the

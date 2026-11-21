@@ -2967,6 +2967,38 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName('Reap idle local sessions after (minutes)')
+      .setDesc('Close idle local harness subprocesses (Claude, Codex, OpenCode, Antigravity) after this many minutes of inactivity to free RAM. The thread session ID is preserved so the next message resumes seamlessly. Active turns, pending prompts, and background tasks are never reaped. Set to 0 to disable.')
+      .addText((text) =>
+        text
+          .setPlaceholder('15')
+          .setValue(String(this.plugin.settings.idleReapMinutes ?? 15))
+          .onChange(async (value) => {
+            const n = parseInt(value, 10);
+            if (!isNaN(n) && n >= 0) {
+              this.plugin.settings.idleReapMinutes = n;
+              await this.plugin.saveSettings();
+            }
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Max live local sessions')
+      .setDesc('Maximum number of local harness subprocesses kept warm simultaneously. When exceeded, the oldest idle local session is closed first (preserving its session ID for resume). Busy sessions are never evicted. Set to 0 for unlimited.')
+      .addText((text) =>
+        text
+          .setPlaceholder('4')
+          .setValue(String(this.plugin.settings.maxLiveSessions ?? 4))
+          .onChange(async (value) => {
+            const n = parseInt(value, 10);
+            if (!isNaN(n) && n >= 0) {
+              this.plugin.settings.maxLiveSessions = n;
+              await this.plugin.saveSettings();
+            }
+          }),
+      );
+
+    new Setting(containerEl)
       .setName('Vault folder')
       .setDesc('Where thread notes are saved, relative to the vault root.')
       .addText((text) =>

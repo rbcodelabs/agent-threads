@@ -1448,6 +1448,20 @@ export interface PluginSettings {
    * are never swept. `0` disables the sweep entirely. Defaults to 14.
    */
   autoArchiveIdleDays?: number;
+  /**
+   * Close idle local harness subprocesses after this many minutes of inactivity
+   * so idle CLI + MCP server trees don't accumulate in RAM. Thread session IDs
+   * are preserved so the next message cold-resumes seamlessly. `0` disables.
+   * Defaults to 15.
+   */
+  idleReapMinutes: number;
+  /**
+   * Maximum number of live local harness sessions kept warm simultaneously.
+   * When exceeded, the least-recently-active idle local session is reaped first
+   * (active turns, pending approvals/questions/plans, and background tasks are
+   * never evicted). `0` = unlimited. Defaults to 4.
+   */
+  maxLiveSessions: number;
   /** Recurring scheduled tasks that fire prompts into new threads. */
   scheduledItems: ScheduledItem[];
   /** Vault documents being watched for content changes, each owned by a thread. */
@@ -1604,6 +1618,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   offerChiefOfStaffOnFirstRun: true,
   imageExternalizationComplete: false,
   autoArchiveIdleDays: 14,
+  idleReapMinutes: 15,
+  maxLiveSessions: 4,
   pttKey: 'Alt+Space',
   openAIKey: '',
   secretEnvKeys: [],
