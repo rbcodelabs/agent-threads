@@ -10,7 +10,7 @@
 #   with-claude  base + Claude Code's native installer. The DEFAULT target (last stage), so a plain
 #                `docker build` gives a ready-to-run image.
 #   with-harnesses  (declared before with-claude, so the default target is unchanged) base + opt-in Codex,
-#                OpenCode and Antigravity CLIs: --build-arg INSTALL_CODEX=1 (npm @openai/codex, CODEX_VERSION, default latest),
+#                OpenCode and Antigravity CLIs: --build-arg INSTALL_CODEX=1 (npm @openai/codex, CODEX_VERSION from sandbox/codex-version.json),
 #                --build-arg INSTALL_OPENCODE=1 (npm opencode-ai, OPENCODE_VERSION, default 1.18.32, the version
 #                the adapter is verified against), --build-arg INSTALL_ANTIGRAVITY=1 (agy native binary from antigravity.google).
 #                Used with `--target with-harnesses`; see below.
@@ -111,7 +111,7 @@ CMD ["--listen", "0.0.0.0", "--i-know-this-is-open", "--workspace", "/srv/worksp
 # Codex and OpenCode, opt-in: a separate stage BEFORE with-claude, so with-claude stays the last (default) stage and
 # its body stays byte-for-byte what the plugin embeds (src/localDaemon/spec.ts). Build it on its own, then layer
 # Claude on top of that image if you want all three:
-#   docker build -f sandbox/Dockerfile.daemon --target with-harnesses --build-arg INSTALL_CODEX=1 --build-arg INSTALL_OPENCODE=1 \
+#   docker build -f sandbox/Dockerfile.daemon --target with-harnesses --build-arg INSTALL_CODEX=1 --build-arg CODEX_VERSION="$(jq -r .version sandbox/codex-version.json)" --build-arg INSTALL_OPENCODE=1 \
 #     [--build-arg BASE_IMAGE=ghcr.io/<owner>/agent-threads-daemon:<version>] -t agent-threads-daemon:harnesses .
 #   docker build -f sandbox/Dockerfile.daemon --build-arg BASE_IMAGE=agent-threads-daemon:harnesses -t agent-threads-daemon .
 # Installed with npm into /opt/harnesses, OUTSIDE every VOLUME path for the same reason as the Claude CLI (an image
@@ -121,10 +121,11 @@ FROM ${BASE_IMAGE} AS with-harnesses
 ARG INSTALL_CODEX=0
 ARG INSTALL_OPENCODE=0
 ARG INSTALL_ANTIGRAVITY=0
-ARG CODEX_VERSION=latest
+ARG CODEX_VERSION
 ARG OPENCODE_VERSION=1.18.32
 USER root
 RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/harnesses /opt/harnesses/bin
+COPY sandbox/codex-version.json /opt/harnesses/codex-version.json
 USER agentthreads
 # opencode-ai fetches/links its platform binary in a postinstall script. npm 11 blocks dependency install scripts by
 # default (a silent skip leaves a launcher with no binary), so that one package is explicitly allowed; older npm
@@ -133,14 +134,14 @@ USER agentthreads
 # did not end up runnable.
 RUN set -eu; \
     pkgs=""; \
-    if [ "$INSTALL_CODEX" = "1" ]; then pkgs="$pkgs @openai/codex@${CODEX_VERSION}"; fi; \
+    if [ "$INSTALL_CODEX" = "1" ]; then CODEX_VERSION="${CODEX_VERSION:-$(node -p "require('/opt/harnesses/codex-version.json').version")}"; echo "$CODEX_VERSION" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+$'; pkgs="$pkgs @openai/codex@${CODEX_VERSION}"; fi; \
     if [ "$INSTALL_OPENCODE" = "1" ]; then pkgs="$pkgs opencode-ai@${OPENCODE_VERSION}"; fi; \
     if [ -n "$pkgs" ]; then npm install --global --no-audit --no-fund --allow-scripts=opencode-ai --prefix /opt/harnesses $pkgs; fi; \
     if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then \
       HOME=/opt/harnesses curl -fsSL https://antigravity.google/cli/install.sh | HOME=/opt/harnesses bash -s -- --dir /opt/harnesses/bin; \
       rm -rf /opt/harnesses/.cache /opt/harnesses/.local /opt/harnesses/.gemini /opt/harnesses/.bashrc /opt/harnesses/.profile; \
     fi; \
-    if [ "$INSTALL_CODEX" = "1" ]; then /opt/harnesses/bin/codex --version; fi; \
+    if [ "$INSTALL_CODEX" = "1" ]; then /opt/harnesses/bin/codex --version | grep -Fx "codex-cli $CODEX_VERSION"; fi; \
     if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi; \
     if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then /opt/harnesses/bin/agy --version; fi
 ENV PATH="/opt/harnesses/bin:${PATH}"

@@ -7,7 +7,7 @@
  * Mac is meaningless there.
  */
 
-import type { LocalDaemonProgress, LocalDaemonSnapshot, SignInHandlers } from './controller';
+import type { CodexUpdatePreview, LocalDaemonProgress, LocalDaemonSnapshot, SignInHandlers } from './controller';
 import type { LocalHarness } from './spec';
 import { LocalDaemonAbortedError } from './provision';
 import {
@@ -16,6 +16,7 @@ import {
   DESCRIBE_RESET,
   POSITIONING_NOTE,
   buildLocalDaemonView,
+  describeCodexUpdate,
   describeRestart,
   describeSetup,
   describeUpdate,
@@ -38,7 +39,7 @@ export interface LocalDaemonPanelDeps {
   subscribe(listener: () => void): () => void;
   /** Resolves true only on an explicit "Continue". */
   confirm(message: string): Promise<boolean>;
-  run(id: Exclude<LocalDaemonButtonId, 'sign-in'>, opts: { onProgress: (p: LocalDaemonProgress) => void }): Promise<unknown>;
+  run(id: Exclude<LocalDaemonButtonId, 'sign-in'>, opts: { onProgress: (p: LocalDaemonProgress) => void }, preview?: CodexUpdatePreview): Promise<unknown>;
   signIn(handlers: SignInHandlers): Promise<{ ok: true } | { ok: false; error: string }>;
   /** Codex device-code login or Antigravity browser OAuth login inside the container. */
   signInHarness?(
@@ -70,7 +71,7 @@ export interface LocalDaemonPanel {
 const DEFAULT_SNAPSHOT_TIMEOUT_MS = 15_000;
 
 /** Buttons that create or start the container; disabled while managed policy forbids the local daemon. */
-const MANAGED_BLOCKED_BUTTONS: ReadonlySet<LocalDaemonButtonId> = new Set<LocalDaemonButtonId>(['setup', 'start', 'restart', 'update', 'reset', 'sign-in']);
+const MANAGED_BLOCKED_BUTTONS: ReadonlySet<LocalDaemonButtonId> = new Set<LocalDaemonButtonId>(['setup', 'start', 'restart', 'update', 'update-harnesses', 'reset', 'sign-in']);
 
 class SnapshotTimeoutError extends Error {
   constructor(ms: number) { super(`the container runtime did not answer within ${Math.round(ms / 1000)} seconds`); }
@@ -135,22 +136,29 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
     progressEl.setText(snap.busy ? formatProgress(snap.busy) : '');
     actionsEl.empty();
     if (view.busy) {
-      const cancel = actionsEl.createEl('button', { cls: 'ct-local-daemon-btn', text: 'Cancel' });
-      cancel.addEventListener('click', () => deps.cancel());
+      if (snap.busy?.cancellable !== false) {
+        const cancel = actionsEl.createEl('button', { cls: 'ct-local-daemon-btn', text: 'Cancel' });
+        cancel.addEventListener('click', () => deps.cancel());
+      }
       return;
     }
     for (const b of view.buttons) addButton(b, snap);
   };
 
-  const addButton = (b: { id: LocalDaemonButtonId; label: string; cta?: boolean; danger?: boolean }, snap: LocalDaemonSnapshot | null): void => {
+  const addButton = (b: { id: LocalDaemonButtonId; label: string; cta?: boolean; danger?: boolean; disabledReason?: string }, snap: LocalDaemonSnapshot | null): void => {
     const btn = actionsEl.createEl('button', {
       cls: `ct-local-daemon-btn ct-local-daemon-btn-${b.id}${b.cta ? ' mod-cta' : ''}${b.danger ? ' mod-warning' : ''}`,
       text: b.label,
     });
     const blocked = refreshManagedNote();
-    if (blocked && MANAGED_BLOCKED_BUTTONS.has(b.id)) {
+    const disabledReason = blocked && MANAGED_BLOCKED_BUTTONS.has(b.id) ? blocked : b.disabledReason;
+    if (disabledReason) {
       btn.disabled = true;
-      btn.title = blocked;
+      btn.title = disabledReason;
+      btn.setAttribute('aria-description', disabledReason);
+      if (b.id === 'update-harnesses' && !blocked) {
+        hintEl.setText(disabledReason);
+      }
     }
     btn.addEventListener('click', () => { void act(b.id, snap); });
   };
@@ -245,6 +253,7 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
     switch (id) {
       case 'setup': return describeSetup(snap);
       case 'update': return describeUpdate(deps.pluginVersion, snap.harnesses);
+      case 'update-harnesses': return snap.codexUpdate ? describeCodexUpdate(snap.codexUpdate) : null;
       case 'reset': return DESCRIBE_RESET;
       case 'remove': return DESCRIBE_REMOVE;
       case 'restart': return snap.assessment.status === 'running' ? describeRestart() : null;
@@ -258,7 +267,11 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
     if (message && !(await deps.confirm(message))) return;
     try {
       if (id === 'sign-in') await signIn();
-      else await deps.run(id, { onProgress: () => undefined });
+      else if (id === 'update-harnesses' && snap?.codexUpdate) {
+        await deps.run(id, { onProgress: () => undefined }, snap.codexUpdate);
+      } else if (id !== 'update-harnesses') {
+        await deps.run(id, { onProgress: () => undefined });
+      }
     } catch (err) {
       // A cancel is not a failure; a real failure is also kept on the controller (lastError) for the next render.
       if (!(err instanceof LocalDaemonAbortedError)) localError = err instanceof Error ? err.message : String(err);

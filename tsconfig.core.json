@@ -71,6 +71,7 @@
     "src/protocol/index.ts",
     "src/protocol/journal.ts",
     "src/protocol/journalPolicy.ts",
+    "src/protocol/localHarnessMaintenance.ts",
     "src/protocol/mcpSync.ts",
     "src/protocol/relayTypes.ts",
     "src/protocol/sessionEvents.ts",

@@ -5,6 +5,9 @@ import { mockApp } from './obsidian-mock';
 import { McpRegistrationModal } from '../../src/confirmModal';
 import { secretStorageKey } from '../../src/secretUtils';
 import { McpSyncEngine, type McpSyncTransport } from '../../src/remote/mcpSync';
+import { CODEX_VERSION } from '../../src/localDaemon/spec';
+import { snap as localDaemonSnapshot } from '../helpers/localDaemonSnap';
+import type { CodexUpdatePreview } from '../../src/localDaemon/controller';
 
 (window as any).__openMcpRegistration = (type: 'stdio' | 'http' = 'stdio') => {
   (window as any).__mcpRegistrationResult = undefined;
@@ -14,6 +17,20 @@ import { McpSyncEngine, type McpSyncTransport } from '../../src/remote/mcpSync';
   new McpRegistrationModal(mockApp as any, entry, result => { (window as any).__mcpRegistrationResult = result; }).open();
 };
 (window as any).__getSettingsSecret = (name: string) => mockApp.secretStorage.getSecret(secretStorageKey(name));
+
+const harnessFixture = new URLSearchParams(location.search).get('localDaemonHarnesses');
+const harnessStartingVersion = '0.1.0';
+let harnessVersion = harnessStartingVersion;
+const harnessUpdates: CodexUpdatePreview[] = [];
+(window as any).__harnessUpdates = harnessUpdates;
+const readHarnessSnapshot = async () => {
+  if (harnessFixture !== 'idle' && harnessFixture !== 'busy') throw new Error('harness: no container runtime');
+  const codexUpdate: CodexUpdatePreview | undefined = harnessVersion === harnessStartingVersion
+    ? { from: harnessVersion, to: CODEX_VERSION, availability: harnessFixture } : undefined;
+  return localDaemonSnapshot({ harnessProbe: { codex: { cli: true, signedIn: true, version: harnessVersion } } }, {
+    harnesses: ['codex'], ...(codexUpdate ? { codexUpdate } : {}),
+  });
+};
 
 const fixtureProjects: Project[] = [
   {
@@ -245,6 +262,8 @@ const scheduledCreateCalls: {
 
 const mockPlugin = {
   app: mockApp,
+  manifest: { version: localDaemonSnapshot().pluginVersion },
+  daemonMcpStatus: new Map(),
   settings,
   claudeCliInfo: undefined,
   getClaudeCliProblems: () => (window as any).__cliProblems ?? [],
@@ -319,7 +338,11 @@ const mockPlugin = {
   // Minimal stand-in for the managed local daemon controller (Settings -> Remote -> Local daemon block, desktop only).
   // No container runtime exists in the harness, so its status snapshot is a rejection the block must tolerate.
   localDaemon: {
-    snapshot: async () => { throw new Error('harness: no container runtime'); },
+    snapshot: readHarnessSnapshot,
+    updateHarnesses: async (preview: CodexUpdatePreview) => {
+      harnessUpdates.push(preview);
+      harnessVersion = preview.to;
+    },
     subscribe: () => () => {},
     cancel: () => {},
     signIn: async () => {},

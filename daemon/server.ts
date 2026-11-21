@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { PROTOCOL_VERSION } from '../src/protocol';
+import { LOCAL_HARNESS_MAINTENANCE_ID, LOCAL_HARNESS_MAINTENANCE_PATH } from '../src/protocol/localHarnessMaintenance';
 import type { SpawnLike } from '../src/setupTokenSession';
 import { AuditLog } from './auditLog';
 import { CommandCache } from './cmdCache';
@@ -39,7 +40,8 @@ import type { DriverFactory } from './sessionDriver';
 import { ThreadHost } from './threadHost';
 import { RawLogWriter } from '../src/RawLogWriter';
 import { setKnownSecretsProvider } from '../src/secretRedaction';
-import { TokenStore } from './tokenStore';
+import { scopeSatisfies, TokenStore } from './tokenStore';
+import { LocalHarnessMaintenance } from './localHarnessMaintenance';
 import { SigninManager } from './signin';
 import { DAEMON_VERSION } from './version';
 import { createAutoUpdater, type AutoUpdateOverrides } from './update';
@@ -79,6 +81,8 @@ export interface DaemonOptions {
   autoUpdate?: AutoUpdateOverrides;
   /** The updater wants the daemon to stop so its supervisor starts the new bundle. The CLI exits 75 from here. */
   onRestartRequested?: (info: { to: string }) => void;
+  /** Managed container only. The Geode controller uses this to make Codex replacement exclusive. */
+  localHarnessMaintenance?: boolean;
   log?: (line: string) => void;
 }
 
@@ -221,6 +225,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
   const signin = options.signin ?? (real && config.harnesses.includes('claude')
     ? new SigninManager({ spawn: nodeSpawn as unknown as SpawnLike, env: process.env, claudeBinary: () => findHarnessBinary('claude', config.claudeBinaryPath, process.env), audit })
     : undefined);
+  const harnessMaintenance = options.localHarnessMaintenance
+    ? new LocalHarnessMaintenance(config.dataDir, () => host.activity().busy.length > 0 || !!signin?.active, options.now)
+    : undefined;
   const ctx: ServerContext = {
     host,
     tokens,
@@ -235,6 +242,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     skills,
     syncedMcp,
     ...(signin ? { signin } : {}),
+    ...(harnessMaintenance ? { harnessMaintenance } : {}),
     configuredMcpNames: () => new Set(Object.keys(config.mcpServers)),
     checkPath: (path) => describePathAccess(path, sessionPolicy),
     listWorkspaces: () => listWorkspaces(existsSync(config.repoRoot) ? sessionPolicy : configuredPolicy),
@@ -258,6 +266,31 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       res.end(req.method === 'HEAD' ? undefined : body);
       return;
+    }
+    if (harnessMaintenance && path === LOCAL_HARNESS_MAINTENANCE_PATH) {
+      const respond = (status: number) => { res.writeHead(status, { 'cache-control': 'no-store' }); res.end(); };
+      const ip = req.socket.remoteAddress ?? 'unknown';
+      if (!throttleExempt(ip) && ctx.throttle.isBlocked(ip)) return respond(429);
+      const bearer = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? '');
+      const auth = bearer && tokens.verify(bearer[1]);
+      if (!auth) {
+        if (!throttleExempt(ip)) ctx.throttle.recordFailure(ip);
+        return respond(401);
+      }
+      if (!scopeSatisfies(auth.scope, 'control')) return respond(403);
+      ctx.throttle.reset(ip);
+      if (req.method === 'GET') return respond(harnessMaintenance.idle ? 204 : 409);
+      if (req.method !== 'POST' && req.method !== 'DELETE') return respond(405);
+      const id = req.headers[LOCAL_HARNESS_MAINTENANCE_ID];
+      if (typeof id !== 'string' || !/^[a-f0-9]{32}$/.test(id)) return respond(400);
+      try {
+        const ok = req.method === 'POST' ? harnessMaintenance.acquire(id) : harnessMaintenance.release(id);
+        audit({ event: 'local_harness_maintenance', action: req.method, tokenId: auth.id, ok });
+        return respond(ok ? 204 : 409);
+      } catch (err) {
+        log(`Local harness maintenance lock failed: ${err instanceof Error ? err.message : String(err)}`);
+        return respond(503);
+      }
     }
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end('{"error":"not_found"}');

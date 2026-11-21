@@ -7,9 +7,12 @@
  * (`core-files.json`); a unit test pins that.
  */
 
+import codexPin from '../../sandbox/codex-version.json';
 import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY } from '../containerCli';
 
 // ── Names, labels, ports ─────────────────────────────────────────────────────
+
+export const CODEX_VERSION = codexPin.version;
 
 export const DAEMON_IMAGE_REPOSITORY = 'ghcr.io/rbcodelabs/agent-threads-daemon';
 export const LOCAL_IMAGE_REPOSITORY = 'agent-threads-daemon-local';
@@ -221,10 +224,11 @@ ENV PATH="/opt/claude/.local/bin:\${PATH}" \\
 export const WITH_HARNESSES_STAGE_BODY = `ARG INSTALL_CODEX=0
 ARG INSTALL_OPENCODE=0
 ARG INSTALL_ANTIGRAVITY=0
-ARG CODEX_VERSION=latest
+ARG CODEX_VERSION
 ARG OPENCODE_VERSION=1.18.32
 USER root
 RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/harnesses /opt/harnesses/bin
+COPY sandbox/codex-version.json /opt/harnesses/codex-version.json
 USER agentthreads
 # opencode-ai fetches/links its platform binary in a postinstall script. npm 11 blocks dependency install scripts by
 # default (a silent skip leaves a launcher with no binary), so that one package is explicitly allowed; older npm
@@ -233,14 +237,14 @@ USER agentthreads
 # did not end up runnable.
 RUN set -eu; \\
     pkgs=""; \\
-    if [ "$INSTALL_CODEX" = "1" ]; then pkgs="$pkgs @openai/codex@\${CODEX_VERSION}"; fi; \\
+    if [ "$INSTALL_CODEX" = "1" ]; then CODEX_VERSION="\${CODEX_VERSION:-$(node -p "require('/opt/harnesses/codex-version.json').version")}"; echo "$CODEX_VERSION" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+$'; pkgs="$pkgs @openai/codex@\${CODEX_VERSION}"; fi; \\
     if [ "$INSTALL_OPENCODE" = "1" ]; then pkgs="$pkgs opencode-ai@\${OPENCODE_VERSION}"; fi; \\
     if [ -n "$pkgs" ]; then npm install --global --no-audit --no-fund --allow-scripts=opencode-ai --prefix /opt/harnesses $pkgs; fi; \\
     if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then \\
       HOME=/opt/harnesses curl -fsSL https://antigravity.google/cli/install.sh | HOME=/opt/harnesses bash -s -- --dir /opt/harnesses/bin; \\
       rm -rf /opt/harnesses/.cache /opt/harnesses/.local /opt/harnesses/.gemini /opt/harnesses/.bashrc /opt/harnesses/.profile; \\
     fi; \\
-    if [ "$INSTALL_CODEX" = "1" ]; then /opt/harnesses/bin/codex --version; fi; \\
+    if [ "$INSTALL_CODEX" = "1" ]; then /opt/harnesses/bin/codex --version | grep -Fx "codex-cli $CODEX_VERSION"; fi; \\
     if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi; \\
     if [ "$INSTALL_ANTIGRAVITY" = "1" ]; then /opt/harnesses/bin/agy --version; fi
 ENV PATH="/opt/harnesses/bin:\${PATH}"
@@ -276,6 +280,8 @@ export interface LocalDaemonSpec {
   vaultPath: string;
   version: string;
   hostPort: number;
+  /** The retained image or a verified Codex update candidate. Mount drift is independent of this image. */
+  image?: string;
   /** Host-side config directories that exist and are masked read-only (see {@link MASKED_VAULT_DIRS}). */
   maskedDirs: readonly string[];
   /** Vetted Geode external roots, mounted READ-ONLY at `/ext/<name>` and offered as read-only workspaces. */
@@ -410,7 +416,7 @@ export function mountsFor(spec: Pick<LocalDaemonSpec, 'vaultPath' | 'maskedDirs'
 
 export { hostToGuestPath, guestToHostPath, type PathMount } from '../remote/mountPaths';
 
-/** Hash of everything fixed at `run`. A container whose label differs needs recreating to apply a change. */
+/** Hash of the desired daemon and mount settings. A Codex-only replacement keeps the same settings signature. */
 export function specSignature(spec: LocalDaemonSpec): string {
   return hashHex(JSON.stringify({
     image: localImageRef(spec.version, spec.harnesses),
@@ -459,7 +465,7 @@ export function buildThinImageArgs(opts: { version: string; dockerfilePath: stri
     'build',
     '--tag', localImageRef(opts.version, set),
     '--build-arg', `BASE_IMAGE=${publishedImageRef(opts.version)}`,
-    ...(set.includes('codex') ? ['--build-arg', 'INSTALL_CODEX=1'] : []),
+    ...(set.includes('codex') ? ['--build-arg', 'INSTALL_CODEX=1', '--build-arg', `CODEX_VERSION=${CODEX_VERSION}`] : []),
     ...(set.includes('opencode') ? ['--build-arg', 'INSTALL_OPENCODE=1'] : []),
     ...(set.includes('antigravity') ? ['--build-arg', 'INSTALL_ANTIGRAVITY=1'] : []),
     '--label', `${LABEL_IMAGE_VERSION}=${opts.version}`,
@@ -470,10 +476,11 @@ export function buildThinImageArgs(opts: { version: string; dockerfilePath: stri
 }
 
 /** Runs the built image and asserts the tools the daemon needs exist; prints OK on success. */
-export function verifyImageArgs(version: string, harnesses?: readonly string[]): string[] {
+export function verifyImageArgs(version: string, harnesses?: readonly string[], image?: string): string[] {
   const set = normalizeHarnesses(harnesses);
   const checks = [...set.map((h) => `command -v ${HARNESS_CLI_EXE[h]}`), 'command -v agent-threads', 'command -v git'];
-  return ['run', '--rm', '--entrypoint', 'sh', localImageRef(version, set), '-c', `${checks.join(' && ')} && echo LOCAL_DAEMON_IMAGE_OK`];
+  if (image) checks.push(`test "$(${CODEX_BINARY_IN_IMAGE} --version)" = 'codex-cli ${CODEX_VERSION}'`);
+  return ['run', '--rm', '--entrypoint', 'sh', image ?? localImageRef(version, set), '-c', `${checks.join(' && ')} && echo LOCAL_DAEMON_IMAGE_OK`];
 }
 export const VERIFY_OK_MARKER = 'LOCAL_DAEMON_IMAGE_OK';
 
@@ -547,13 +554,13 @@ export function prepareScript(withCredential: boolean): string {
   return lines.join('\n');
 }
 
-export function prepareArgs(opts: { vaultPath: string; version: string; withCredential: boolean; harnesses?: readonly string[] }): string[] {
+export function prepareArgs(opts: { vaultPath: string; version: string; withCredential: boolean; harnesses?: readonly string[]; image?: string }): string[] {
   return [
     'run', '--rm', ...(opts.withCredential ? ['-i'] : []),
     '-u', '0', '--entrypoint', 'sh',
     '--volume', `${dataVolumeFor(opts.vaultPath)}:${DATA_MOUNT}`,
     '--volume', `${workspacesVolumeFor(opts.vaultPath)}:${WORKSPACES_MOUNT}`,
-    localImageRef(opts.version, opts.harnesses),
+    opts.image ?? localImageRef(opts.version, opts.harnesses),
     '-c', prepareScript(opts.withCredential),
   ];
 }
@@ -576,11 +583,12 @@ export function runArgs(spec: LocalDaemonSpec): string[] {
     '--cpus', String(spec.cpus),
     // A path, not a secret: where the daemon looks for `claude-token` (read once, at start).
     '--env', `CREDENTIALS_DIRECTORY=${CREDENTIALS_DIR}`,
+    ...(normalizeHarnesses(spec.harnesses).includes('codex') ? ['--env', 'AGENT_THREADS_LOCAL_HARNESS_MAINTENANCE=1'] : []),
     // The daemon's allowed set follows the toggles: a session for a harness that is off is refused at the door.
     '--env', `AGENT_THREADS_HARNESSES=${normalizeHarnesses(spec.harnesses).join(',')}`,
     // The container is this Mac's own sandbox, so the user decides here whether synced stdio servers may run in it.
     ...(spec.allowSyncedStdio ? ['--env', 'AGENT_THREADS_ALLOW_SYNCED_STDIO=1'] : []),
-    localImageRef(spec.version, spec.harnesses),
+    spec.image ?? localImageRef(spec.version, spec.harnesses),
     ...serveCommand(spec),
   ];
 }
@@ -680,6 +688,7 @@ export const HARNESS_PROBE_SCRIPT = [
   '  n="${p%%:*}"; f="${p#*:}"',
   '  if [ -x "$f" ]; then echo "$n.cli=1"; else echo "$n.cli=0"; fi',
   'done',
+  `if [ -x ${CODEX_BINARY_IN_IMAGE} ] && v=$(${CODEX_BINARY_IN_IMAGE} --version 2>/dev/null); then printf 'codex.version=%s\\n' "$v"; fi`,
   `if [ -s ${CODEX_AUTH_FILE} ]; then echo codex.auth=1; else echo codex.auth=0; fi`,
   `if [ -s ${OPENCODE_AUTH_FILE} ]; then echo opencode.auth=1; else echo opencode.auth=0; fi`,
   `if [ -s ${ANTIGRAVITY_OAUTH_TOKEN_FILE} ] || [ -s ${ANTIGRAVITY_OAUTH_CREDS_FILE} ]; then echo antigravity.auth=1; else echo antigravity.auth=0; fi`,

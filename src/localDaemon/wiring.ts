@@ -9,7 +9,8 @@ import type { LocalDaemonSettings, RemoteDaemonConfig } from '../types';
 import { daemonWsUrl, probeDaemon, type WebSocketFactory } from '../remote/DaemonClient';
 import { signInToClaudeInContainer, type SpawnLike } from '../claudeContainerAuthCli';
 import { runnerEnv, createDefaultVmCommandRunner } from '../containerCli';
-import { LocalDaemonController, type LocalDaemonDeps } from './controller';
+import { LocalDaemonController, type HarnessMaintenanceAvailability, type LocalDaemonDeps } from './controller';
+import { LOCAL_HARNESS_MAINTENANCE_ID, LOCAL_HARNESS_MAINTENANCE_PATH } from '../protocol/localHarnessMaintenance';
 import { signInToAntigravityInContainer, signInToCodexInContainer } from './harnessLogin';
 import { LocalDaemonGithubDelivery, type LocalDaemonGithubDeps } from './githubDelivery';
 import { CredsPusher } from './credsPusher';
@@ -67,6 +68,29 @@ function httpGetHealth(port: number, timeoutMs: number): Promise<boolean> {
   });
 }
 
+export function requestHarnessMaintenance(
+  port: number, token: string, method: 'GET' | 'POST' | 'DELETE', id?: string,
+): Promise<HarnessMaintenanceAvailability> {
+  return new Promise((resolve) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const http = require('http') as typeof import('http');
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+    if (id) headers[LOCAL_HARNESS_MAINTENANCE_ID] = id;
+    const req = http.request({
+      host: '127.0.0.1', port, path: LOCAL_HARNESS_MAINTENANCE_PATH, method, headers, timeout: 2_000,
+    }, (res) => {
+      res.resume();
+      resolve(res.statusCode === 204 ? 'idle'
+        : res.statusCode === 409 ? 'busy'
+        : res.statusCode === 404 ? 'unsupported'
+        : 'unknown');
+    });
+    req.on('timeout', () => { req.destroy(); resolve('unknown'); });
+    req.on('error', () => resolve('unknown'));
+    req.end();
+  });
+}
+
 function isDirectorySync(path: string): boolean {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -118,6 +142,7 @@ export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonC
     runtime: createDefaultRuntimeApi(),
     createRunner: () => createDefaultVmCommandRunner(),
     healthz: (port) => httpGetHealth(port, 1500),
+    harnessMaintenance: requestHarnessMaintenance,
     ...(host.policyDenial ? { policyDenial: host.policyDenial } : {}),
     probeDaemon: (url, token) => probeDaemon({
       url: daemonWsUrl(url),

@@ -336,7 +336,10 @@ export async function runCli(argv: string[], io: Io = consoleIo, runtime?: Parti
     const health = boot.watch ? watchHealth(guardDeps, boot.watch, () => process.exit(1)) : null;
 
     let requestRestart: (to: string) => void = () => {};
-    const daemon = await startDaemon({ config, log: (l) => io.out(l), onRestartRequested: (info) => requestRestart(info.to) });
+    const daemon = await startDaemon({
+      config, log: (l) => io.out(l), onRestartRequested: (info) => requestRestart(info.to),
+      localHarnessMaintenance: process.env.AGENT_THREADS_LOCAL_HARNESS_MAINTENANCE === '1',
+    });
     health?.listening();
     const uninstallGuards = installCrashGuards(io);
     if (!daemon.tokens.hasActiveTokens) {

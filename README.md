@@ -83,7 +83,7 @@ The complete list is in the [feature reference](docs/features.md).
   - [OpenCode](https://opencode.ai) (desktop only), with a provider configured: select **OpenCode** in the same setting.
   - [Antigravity CLI](https://antigravity.google) (`agy`, desktop only), signed in once: select **Antigravity** in the same setting.
 
-Sign-in, Bedrock and per-harness details are in [Prerequisites and harness setup](docs/prerequisites.md).
+Sign-in, Bedrock and per-harness details are in [Prerequisites and harness setup](docs/prerequisites.md). For Codex running in the managed container, see [Local daemon harnesses](docs/remote-daemon.md#local-daemon-this-mac-in-a-container) for the installed version and update controls.
 
 ## Documentation
 

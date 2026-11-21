@@ -38,6 +38,8 @@ export interface Observed {
   /** From the container's labels, when it is ours and exists. */
   containerVersion?: string;
   containerSpec?: string;
+  /** Image reported by the current container, including Codex-only replacements. */
+  containerImage?: string;
   /** The container is stopped and its last exit looks like an out-of-memory kill (OOMKilled, or exit 137 we did not cause). */
   stoppedOutOfMemory?: boolean;
   health: 'ok' | 'down' | 'na';

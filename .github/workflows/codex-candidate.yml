@@ -1,0 +1,41 @@
+name: Codex harness candidate
+
+on:
+  pull_request:
+    paths:
+      - sandbox/codex-version.json
+      - sandbox/Dockerfile.daemon
+      - scripts/codex-harness-version.mjs
+      - scripts/codex-candidate-smoke.mjs
+      - scripts/check-codex-candidate.sh
+      - test/integration/codex-harness-maintenance.test.mjs
+      - .github/workflows/codex-candidate.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: Candidate image and Codex session (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Check version and smoke assertions
+        run: node --test test/integration/codex-harness-maintenance.test.mjs
+      - name: Build and exercise the candidate
+        run: bash scripts/check-codex-candidate.sh
