@@ -196,6 +196,15 @@ export function resolveThreadLink(ref: string, label: string, threads: readonly 
 }
 
 /**
+ * Replaces every `[[thread:<ref>|label]]` marker in `markdown` with `replace(ref, alias)` (both trimmed; `alias` is ''
+ * when the marker has none). The one place the marker syntax is matched for rendering, so the dock's pre-rewrite and
+ * the shared renderer cannot drift apart.
+ */
+export function mapThreadLinks(markdown: string, replace: (ref: string, alias: string) => string): string {
+  return markdown.replace(THREAD_LINK, (_m, rawRef: string, rawAlias?: string) => replace(rawRef.trim(), (rawAlias ?? '').trim()));
+}
+
+/**
  * Splits markdown into text and resolved thread-link segments.
  *
  * FOR PLAIN-TEXT CONTEXTS ONLY (tooltips, notifications, search). Never render
@@ -243,9 +252,7 @@ function markerLabel(label: string): string {
  * Labels are model-controlled: set them via textContent / escape them.
  */
 export function rewriteThreadLinks(markdown: string, threads: readonly ThreadRef[]): string {
-  return markdown.replace(THREAD_LINK, (_m, rawRef: string, rawAlias?: string) => {
-    const ref = rawRef.trim();
-    const alias = (rawAlias ?? '').trim();
+  return mapThreadLinks(markdown, (ref, alias) => {
     const hit = resolveThreadLink(ref, alias, threads);
     if (!hit) return alias || ref;
     return `[[thread:${hit.threadId}|${markerLabel(alias || hit.title)}]]`;

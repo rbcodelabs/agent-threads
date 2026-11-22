@@ -779,6 +779,7 @@ export class OrchestratorDock {
         openNote: (href) => { this.deps.openLink?.(href); },
         // Defence in depth: an anchor injected into the DOM after render can carry any id; only threads the board knows open.
         openThread: (threadId) => { if (this.deps.manager.getThread(threadId)) void this.openQuietly(threadId); },
+        threads: () => this.threadRefs(),
         deps: this.deps.messageHost,
       }),
       removeWaiting: (index, text) => this.removeWaiting(index, text),

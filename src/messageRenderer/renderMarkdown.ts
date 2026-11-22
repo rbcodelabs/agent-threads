@@ -3,6 +3,7 @@ import { marked } from 'marked';
 import { extractMessageContent } from '../MessageContent';
 import { extractVisualizeMarkers, VISUALIZE_SLOT_CLASS } from '../visualizeMarker';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from '../linkUtils';
+import { mapThreadLinks, threadIdOfHref } from '../orchestratorDockModel';
 import { hydrateRemoteImages } from '../remote/remoteImages';
 import { linkifyBridgePaths, linkifyUrls } from './links';
 import type { MessageRenderHost, MessageRenderOptions } from './types';
@@ -42,9 +43,20 @@ export async function renderMarkdown(
   // so GFM table parsing (and all other markdown features) work correctly.
   // This replaces the previous MarkdownRenderer.render() approach which did not
   // render GFM pipe tables in this non-document context.
-  const processed = visualize.text.replace(
+  //
+  // `[[thread:...]]` markers are handled first, by the host's own thread lookup, so they never fall into the generic
+  // pass (whose anchors a vault-note opener would be asked to open).
+  const withThreads = mapThreadLinks(visualize.text, (ref, alias) => {
+    const hit = host.resolveThread?.(ref, alias) ?? null;
+    if (!hit) return escapeInlineText(alias || ref);
+    // Anchor shape matches the generic wikilink anchor so existing selectors (`a.internal-link[data-href^="thread:"]`) hold.
+    return `<a class="internal-link" data-href="thread:${hit.threadId.replace(/"/g, '&quot;')}" href="#">${escapeInlineText(alias || hit.title)}</a>`;
+  });
+  const processed = withThreads.replace(
     /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
     (_match, target: string, alias?: string) => {
+      // A `thread:` target that survived the thread pass (e.g. a marker spanning a newline) is not a vault note: plain text, never an anchor.
+      if (target.startsWith('thread:')) return escapeInlineText(alias ?? target.slice('thread:'.length));
       const label = (alias ?? target.split('/').pop() ?? target).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c] ?? c));
       const escapedTarget = target.replace(/"/g, '&quot;');
       return `<a class="internal-link" data-href="${escapedTarget}" href="#">${label}</a>`;
@@ -74,6 +86,10 @@ export async function renderMarkdown(
       e.preventDefault();
       e.stopPropagation();
       const href = a.getAttribute('data-href') ?? a.getAttribute('href') ?? '';
+      // A thread link is the host's to open; it must never be offered to the vault-note opener.
+      const linkedThreadId = threadIdOfHref(href);
+      if (linkedThreadId) { host.openThread?.(linkedThreadId); return; }
+      if (href.startsWith('thread:')) return;
       host.openLinkText(href, host.sourcePath());
     });
   });
@@ -138,4 +154,12 @@ export async function renderMarkdown(
   }
   linkifyBridgePaths(el, host);
   if (openExternal) linkifyUrls(el, openExternal);
+}
+
+/**
+ * Model-supplied text placed into markdown/HTML: numeric entities for everything that would be read as HTML or
+ * markdown syntax, so the label always shows verbatim (`marked` decodes entities in text and the sanitizer sees only text).
+ */
+function escapeInlineText(text: string): string {
+  return text.replace(/[&<>"'*_`~#\[\]\\|]/g, c => `&#${c.charCodeAt(0)};`);
 }

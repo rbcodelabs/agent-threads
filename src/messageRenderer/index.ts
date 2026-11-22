@@ -6,3 +6,4 @@ export {
   ToolCallRenderer, createToolCallExpandState,
   type ToolCallExpandState, type ToolCallRendererDeps, type ToolCallBrowserHooks, type PillRendered,
 } from './toolCalls';
+export { createThreadLinkHost, THREAD_GONE_NOTICE, type ThreadLinkHostDeps } from './threadLinkHost';

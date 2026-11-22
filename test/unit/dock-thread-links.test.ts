@@ -10,7 +10,7 @@
 import '../setup/obsidian-dom';
 import { describe, expect, it } from 'vitest';
 import { renderMarkdown, type MessageRenderHost } from '../../src/messageRenderer';
-import { rewriteThreadLinks, threadIdOfHref } from '../../src/orchestratorDockModel';
+import { resolveThreadLink, rewriteThreadLinks, threadIdOfHref } from '../../src/orchestratorDockModel';
 
 const THREADS = [{ id: 't1', title: 'Deploy curation' }, { id: 't2', title: 'Mobile polish' }];
 const HOST: MessageRenderHost = {
@@ -18,6 +18,9 @@ const HOST: MessageRenderHost = {
   threadId: () => 'orch', getThread: () => undefined, sourcePath: () => '',
   openLinkText: () => {}, confirmOutsideVault: () => {}, vaultHas: () => false,
   visualize: { enabled: false, streamingAware: true, hydrate: () => {} },
+  // The shared renderer owns thread links: a host must resolve them (the dock does, against the board's threads).
+  resolveThread: (ref, label) => resolveThreadLink(ref, label, THREADS),
+  openThread: () => {},
 };
 
 async function render(md: string): Promise<HTMLElement> {
