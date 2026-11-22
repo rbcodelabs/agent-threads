@@ -311,7 +311,7 @@ export interface ObsidianMcpServerOptions {
   /** Clears a thread's pending proposed reply, if any. */
   clearThreadProposedReply?: (threadId: string) => void;
   /** Posts an orchestrator decision on a thread (author = the calling thread). Returns the decision id. */
-  postThreadDecision?: (threadId: string, input: { question: string; header?: string; options: Array<{ label: string; description: string }>; multiSelect?: boolean; allowOther?: boolean }) => string;
+  postThreadDecision?: (threadId: string, input: { question: string; header?: string; options: Array<{ label: string; description: string }>; multiSelect?: boolean; allowOther?: boolean; recommended?: string }) => string;
   /** Clears a decision the calling thread posted. Returns false when it was not pending. */
   clearThreadDecision?: (threadId: string, decisionId: string) => boolean;
   onCronCreate?: (params: CronCreateParams) => Promise<ScheduledItem>;

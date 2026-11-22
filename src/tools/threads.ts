@@ -644,6 +644,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
       })).min(2).max(4).describe('2-4 mutually exclusive (or multi-select) options'),
       multiSelect: z.boolean().optional().describe('Allow choosing more than one option (default false)'),
       allowOther: z.boolean().optional().describe('Offer a free-text Other answer (default true)'),
+      recommended: z.string().optional().describe('Label of the option you recommend. Must exactly match one option label (case-sensitive, after trimming). Omit when you have no recommendation.'),
       elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
@@ -662,6 +663,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
           options: args.options.map(o => ({ label: o.label, description: o.description ?? '' })),
           multiSelect: args.multiSelect,
           allowOther: args.allowOther,
+          recommended: args.recommended,
         });
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, threadId: target, decisionId }) }] };
       } catch (err: unknown) {

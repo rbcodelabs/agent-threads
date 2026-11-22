@@ -12,7 +12,19 @@ export interface ProvisionalThreadHandle { readonly threadId: string; commit(): 
 export interface SendInput extends CorrelationInput { readonly prompt: string }
 export interface MessageSnapshot { readonly id: string; readonly role: 'user' | 'assistant' | 'compact' | 'notice'; readonly content: string; readonly timestamp: number }
 export interface ThreadSummary { readonly id: string; readonly title: string; readonly status: ThreadStatus; readonly reviewed: boolean; readonly cwd?: string; readonly projectId?: string; readonly agentHarness: AgentHarness; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean; readonly createdAt: number; readonly updatedAt: number; readonly isRunning: boolean; readonly messageCount: number }
-export interface ThreadSnapshot extends ThreadSummary { readonly messages: readonly MessageSnapshot[] }
+/** Read-only projection of a decision an orchestrator posted for Rick (`threads_post_decision`). `recommended` and `sourceThreadId` are absent when unknown. */
+export interface PublicPendingDecision {
+  readonly id: string; readonly header: string; readonly question: string;
+  readonly options: readonly { readonly label: string; readonly description: string }[];
+  readonly multiSelect: boolean; readonly allowOther: boolean;
+  /** Label of the recommended option; equals one of `options[].label` when present. */
+  readonly recommended?: string;
+  /** The orchestrator thread that posted the decision and receives Rick's answer. */
+  readonly sourceThreadId?: string;
+  readonly createdAt: number;
+}
+/** `pendingDecisions` is present only when at least one decision is pending (capability `threads.pendingDecisions`). */
+export interface ThreadSnapshot extends ThreadSummary { readonly messages: readonly MessageSnapshot[]; readonly pendingDecisions?: readonly PublicPendingDecision[] }
 export interface PublicUsage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly durationMs?: number; readonly turns?: number }
 export type RunResult = { readonly status: 'completed'; readonly runId: string; readonly threadId: string; readonly finalMessage?: MessageSnapshot; readonly usage?: PublicUsage } | { readonly status: 'failed'; readonly runId: string; readonly threadId: string; readonly error: PublicError } | { readonly status: 'timed_out'; readonly runId: string; readonly threadId: string };
 export type PublicThreadEvent = { readonly kind: 'run.started'; readonly threadId: string; readonly runId: string; readonly at: number } | { readonly kind: 'message.completed'; readonly threadId: string; readonly runId?: string; readonly message: MessageSnapshot; readonly at: number } | { readonly kind: 'run.completed'; readonly threadId: string; readonly runId: string; readonly finalMessage?: MessageSnapshot; readonly at: number } | { readonly kind: 'run.failed'; readonly threadId: string; readonly runId: string; readonly error: PublicError; readonly at: number } | { readonly kind: 'thread.removed'; readonly threadId: string; readonly at: number };

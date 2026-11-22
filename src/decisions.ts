@@ -17,6 +17,8 @@ export interface PostDecisionInput {
   options: AskQuestionOption[];
   multiSelect?: boolean;
   allowOther?: boolean;
+  /** Label of the recommended option. Must match (trimmed, case-sensitive) one option label. */
+  recommended?: string;
 }
 
 type DecisionHolder = Pick<Thread, 'pendingDecisions'>;
@@ -34,6 +36,10 @@ export function postDecision(
   const options = (input.options ?? []).map((o) => ({ label: String(o.label ?? '').trim(), description: String(o.description ?? '').trim() }));
   if (options.length < 2 || options.length > 4) throw new Error('A decision needs 2 to 4 options.');
   if (options.some((o) => !o.label)) throw new Error('Every option needs a label.');
+  const recommended = typeof input.recommended === 'string' ? input.recommended.trim() : '';
+  if (recommended && !options.some((o) => o.label === recommended)) {
+    throw new Error(`recommended must match one of the option labels (${options.map((o) => o.label).join(', ')}).`);
+  }
   const existing = thread.pendingDecisions ?? [];
   if (existing.length >= MAX_PENDING_DECISIONS_PER_THREAD) {
     throw new Error(`This thread already has ${MAX_PENDING_DECISIONS_PER_THREAD} pending decisions. Clear stale ones first.`);
@@ -45,6 +51,7 @@ export function postDecision(
     options,
     multiSelect: input.multiSelect === true,
     allowOther: input.allowOther !== false,
+    ...(recommended ? { recommended } : {}),
     createdAt: now,
     sourceThreadId: callerThreadId,
   };

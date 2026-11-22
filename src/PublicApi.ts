@@ -1,5 +1,5 @@
 import type { AgentHarness } from './types';
-import type { ChatMessage, StorageAllocationOptions, StorageAllocationResult, Thread, ThreadArtifactRecord, ThreadPermissionSnapshot, ThreadStatus } from './types';
+import type { ChatMessage, PendingDecision, StorageAllocationOptions, StorageAllocationResult, Thread, ThreadArtifactRecord, ThreadPermissionSnapshot, ThreadStatus } from './types';
 import type { HelpProviderContribution, HelpProviderRegistrationResult } from './help/types';
 import type { HelpProviderRegistry } from './help/HelpRegistry';
 import type { AgentToolContribution, AgentToolRegistrationResult, AgentToolRegistry } from './AgentToolContributions';
@@ -28,7 +28,24 @@ export class ClaudeThreadsApiError extends Error implements PublicError {
 }
 export interface MessageSnapshot { readonly id: string; readonly role: ChatMessage['role']; readonly content: string; readonly timestamp: number }
 export interface ThreadSummary { readonly id: string; readonly title: string; readonly status: ThreadStatus; readonly reviewed: boolean; readonly cwd?: string; readonly projectId?: string; readonly agentHarness: AgentHarness; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean; readonly createdAt: number; readonly updatedAt: number; readonly isRunning: boolean; readonly messageCount: number }
-export interface ThreadSnapshot extends ThreadSummary { readonly messages: readonly MessageSnapshot[] }
+/**
+ * Read-only projection of a decision an orchestrator posted for Rick
+ * (`threads_post_decision`). Values only: no answer callbacks, no messages.
+ * `recommended` and `sourceThreadId` are absent when unknown (for example on
+ * decisions persisted by an older host).
+ */
+export interface PublicPendingDecision {
+  readonly id: string; readonly header: string; readonly question: string;
+  readonly options: readonly { readonly label: string; readonly description: string }[];
+  readonly multiSelect: boolean; readonly allowOther: boolean;
+  /** Label of the recommended option; always equals one of `options[].label` when present. */
+  readonly recommended?: string;
+  /** The orchestrator thread that posted the decision and receives Rick's answer. */
+  readonly sourceThreadId?: string;
+  readonly createdAt: number;
+}
+/** `pendingDecisions` is present only when at least one decision is pending (capability `threads.pendingDecisions`). */
+export interface ThreadSnapshot extends ThreadSummary { readonly messages: readonly MessageSnapshot[]; readonly pendingDecisions?: readonly PublicPendingDecision[] }
 export interface ThreadQuery { readonly projectId?: string | null; readonly status?: ThreadStatus; readonly limit?: number }
 export interface CorrelationInput { readonly ownerPluginId?: string; readonly idempotencyKey?: string }
 export interface CreateThreadInput extends CorrelationInput { readonly title?: string; readonly cwd?: string; readonly projectId?: string; readonly agentHarness?: AgentHarness; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean }
@@ -303,7 +320,7 @@ export interface ClaudeThreadsApiService { readonly api: ClaudeThreadsApiV1; sta
  * are therefore always present.
  */
 function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
-  const capabilities = ['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.cancel', 'threads.open', 'threads.subscribe'];
+  const capabilities = ['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.cancel', 'threads.open', 'threads.subscribe', 'threads.pendingDecisions'];
   if (deps.beginProvisionalThread) capabilities.push('threads.beginProvisional');
   if (deps.archiveThread) capabilities.push('threads.archive');
   if (deps.markThreadReviewed) capabilities.push('threads.markReviewed');
@@ -430,7 +447,20 @@ function traceContent(raw: unknown): readonly unknown[] {
   const message = event.message && typeof event.message === 'object' ? event.message as Record<string, unknown> : event;
   return Array.isArray(message.content) ? message.content : [];
 }
-function snapshotThread(thread: Thread, running: boolean): ThreadSnapshot { return freeze({ ...snapshotSummary(thread, running), messages: thread.messages.map(snapshotMessage) }); }
+function snapshotDecision(decision: PendingDecision): PublicPendingDecision {
+  return freeze({
+    id: decision.id, header: decision.header, question: decision.question,
+    options: decision.options.map(option => ({ label: option.label, description: option.description })),
+    multiSelect: decision.multiSelect, allowOther: decision.allowOther,
+    ...(decision.recommended !== undefined ? { recommended: decision.recommended } : {}),
+    ...(decision.sourceThreadId !== undefined ? { sourceThreadId: decision.sourceThreadId } : {}),
+    createdAt: decision.createdAt,
+  });
+}
+function snapshotThread(thread: Thread, running: boolean): ThreadSnapshot {
+  const decisions = thread.pendingDecisions;
+  return freeze({ ...snapshotSummary(thread, running), messages: thread.messages.map(snapshotMessage), ...(decisions && decisions.length > 0 ? { pendingDecisions: decisions.map(snapshotDecision) } : {}) });
+}
 function stringProp(): Record<string, unknown> { return { type: 'string' }; }
 function boolProp(): Record<string, unknown> { return { type: 'boolean' }; }
 function numberProp(): Record<string, unknown> { return { type: 'number' }; }
