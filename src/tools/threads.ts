@@ -14,7 +14,7 @@ import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 type ToolDef = SdkMcpToolDefinition<any>;
 
 export interface ThreadToolsPort {
-  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeOrchestratorManagement' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadDecision' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorLedger' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'listOrchestrators' | 'openThread' | 'postThreadDecision' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setOrchestratorLedger' | 'setProjectOrchestratorEnabled' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
+  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeOrchestratorManagement' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadDecision' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'explainNotesDenial' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorLedger' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'listOrchestrators' | 'openThread' | 'postThreadDecision' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setOrchestratorLedger' | 'setProjectOrchestratorEnabled' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
 }
 
 
@@ -538,7 +538,9 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         if (!options.setThreadNotes) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'setThreadNotes is not available in this context.' }) }], isError: true };
         }
-        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'notes')) throw new Error('Target is outside coordination scope.');
+        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'notes')) {
+          throw new Error(options.explainNotesDenial?.(args.threadId, args.elevatedProjectId) ?? 'Target is outside coordination scope.');
+        }
         options.setThreadNotes(args.threadId, args.notes);
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, threadId: args.threadId }) }] };
       } catch (err: unknown) {

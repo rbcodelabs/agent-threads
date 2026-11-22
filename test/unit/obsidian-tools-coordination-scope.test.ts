@@ -159,3 +159,40 @@ describe('threads_set_proposed_reply with an open decision', () => {
   });
 });
 
+
+describe('threads_set_notes denial reason', () => {
+  const build = (extra: Record<string, unknown>) => {
+    const setThreadNotes = vi.fn();
+    const server = createClaudeThreadsMcpServers(app, { authorizeThread: () => false, setThreadNotes, ...extra }).claude_threads as unknown as { tools: Array<{ name: string; handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }> }> };
+    return { setThreadNotes, tool: server.tools.find(candidate => candidate.name === 'threads_set_notes')! };
+  };
+
+  it('surfaces the explanation from explainNotesDenial', async () => {
+    const explainNotesDenial = vi.fn().mockReturnValue('Manager notes for Project Alpha are owned by its enabled Project orchestrator (thread orch-a).');
+    const { tool, setThreadNotes } = build({ explainNotesDenial });
+    const res = await tool.handler({ threadId: 'w', notes: 'n', elevatedProjectId: 'a' });
+    expect(explainNotesDenial).toHaveBeenCalledWith('w', 'a');
+    expect(res.isError).toBe(true);
+    expect(res.content[0]!.text).toContain('orch-a');
+    expect(setThreadNotes).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the generic message without an explainer or when it has no reason', async () => {
+    for (const extra of [{}, { explainNotesDenial: () => undefined }]) {
+      const { tool, setThreadNotes } = build(extra);
+      const res = await tool.handler({ threadId: 'w', notes: 'n' });
+      expect(res.isError).toBe(true);
+      expect(res.content[0]!.text).toContain('Target is outside coordination scope.');
+      expect(setThreadNotes).not.toHaveBeenCalled();
+    }
+  });
+
+  it('does not consult the explainer when authorized', async () => {
+    const explainNotesDenial = vi.fn();
+    const { tool, setThreadNotes } = build({ authorizeThread: () => true, explainNotesDenial });
+    const res = await tool.handler({ threadId: 'w', notes: 'n' });
+    expect(res.isError).toBeUndefined();
+    expect(setThreadNotes).toHaveBeenCalledWith('w', 'n');
+    expect(explainNotesDenial).not.toHaveBeenCalled();
+  });
+});
