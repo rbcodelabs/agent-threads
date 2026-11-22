@@ -1466,6 +1466,12 @@ export interface PluginSettings {
    */
   kanbanGroupBy?: KanbanGroupBy;
   /**
+   * Agent Board "Show concluded" toggle. Default (false/undefined) quiets
+   * concluded, unchanged threads into a collapsed "Concluded (N)" row in the
+   * status and project-columns boards; true renders them in their usual places.
+   */
+  kanbanShowConcluded?: boolean;
+  /**
    * Which sidebar panel(s) to auto-collapse when the Kanban board tab is
    * opened, and restore when it is closed. Defaults to 'none' (no change).
    * Useful for giving the wide Kanban board more horizontal room.

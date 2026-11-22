@@ -7393,7 +7393,8 @@ textarea.ct-settings-wide-input {
 /* One row, as in the mock: the dot already reports needs-you, so the "Only needs you" chip yields its room to the orb. */
 /* Compound selectors outrank `.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-agents-panel-meta { flex-wrap: wrap }`. */
 .ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) { flex-wrap: nowrap; }
-.ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) .ct-kanban-needs-chip { display: none; }
+.ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) .ct-kanban-needs-chip,
+.ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) .ct-kanban-concluded-chip { display: none; }
 
 /* Mobile: 44px targets (same rule as the New thread button). */
 /* Narrow status row: same content as the pill's field, full width, ABOVE the orb / New row inside the pill. */
@@ -11221,6 +11222,30 @@ button.ct-agent-crumb:focus-visible {
   border-color: var(--interactive-accent);
   color: var(--interactive-accent);
 }
+
+/* Quiet threads: one collapsed "Concluded (N)" row per project column / one lane on the status board. */
+.ct-kanban-col-concluded { min-width: 220px; }
+.ct-kanban-concluded { display: flex; flex-direction: column; gap: 6px; }
+.ct-kanban-concluded-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  text-align: left;
+  cursor: pointer;
+  box-shadow: none;
+}
+.ct-kanban-concluded-head:hover { background: var(--background-modifier-hover); }
+.ct-kanban-concluded-label { flex-shrink: 0; font-weight: 600; }
+.ct-kanban-concluded-newest { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.8; }
+.ct-kanban-concluded-body { display: flex; flex-direction: column; gap: 6px; }
 
 .ct-kanban-inbox {
   display: flex;
