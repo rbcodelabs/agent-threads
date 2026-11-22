@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, repairStaleProjectOrchestrators, resolveCoordinationRole } from '../../src/coordinationScope';
+import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, canWriteManagerNotes, explainManagerNotesDenial, OUT_OF_SCOPE_MESSAGE, repairStaleProjectOrchestrators, resolveCoordinationRole } from '../../src/coordinationScope';
 
 const projects = [
   { id: 'project-a', orchestratorThreadId: 'orch-a' },
@@ -120,5 +120,64 @@ describe('coordination scope', () => {
     const mutableProjects = [{ id: 'b', orchestratorThreadId: 'orch-b', orchestratorEnabled: true }];
     const items = [{ isOrchestratorHeartbeat: true, targetThreadId: 'orch-b' }];
     expect(repairStaleProjectOrchestrators(mutableProjects, () => 'b', items, 'portfolio')).toBe(false);
+  });
+});
+
+describe('manager notes denial reasons', () => {
+  const projects = [
+    { id: 'a', name: 'Alpha', orchestratorThreadId: 'orch-a', orchestratorEnabled: true },
+    { id: 'b', name: 'Beta', orchestratorThreadId: 'orch-b', orchestratorEnabled: false },
+  ];
+  const portfolio = { kind: 'portfolio' } as const;
+  const member = { kind: 'project-member', projectId: 'a' } as const;
+  const orchestrator = { kind: 'project-orchestrator', projectId: 'a' } as const;
+
+  it('allows without a reason where canWriteManagerNotes is true', () => {
+    expect(explainManagerNotesDenial(portfolio, undefined, undefined, projects)).toBeUndefined();
+    expect(explainManagerNotesDenial(portfolio, 'b', 'b', projects)).toBeUndefined();
+    expect(explainManagerNotesDenial(orchestrator, 'a', undefined, projects)).toBeUndefined();
+  });
+
+  it('explains an enabled Project orchestrator owning the notes when elevation matches', () => {
+    const reason = explainManagerNotesDenial(portfolio, 'a', 'a', projects)!;
+    expect(reason).toContain('Alpha');
+    expect(reason).toContain('thread orch-a');
+    expect(reason).toContain('threads_send_message');
+  });
+
+  it('explains missing elevation without naming the Project or its orchestrator', () => {
+    for (const elevated of [undefined, 'b']) {
+      const reason = explainManagerNotesDenial(portfolio, 'a', elevated, projects)!;
+      expect(reason).toContain('elevatedProjectId');
+      expect(reason).toContain('disabled');
+      expect(reason).not.toContain('Alpha');
+      expect(reason).not.toContain('orch-a');
+    }
+  });
+
+  it('tells a project member that only the orchestrator may write', () => {
+    const reason = explainManagerNotesDenial(member, 'a', undefined, projects)!;
+    expect(reason).toContain('Only the Project orchestrator');
+    expect(reason).not.toContain('orch-a');
+  });
+
+  it('keeps the generic message for everything else and leaks nothing', () => {
+    expect(explainManagerNotesDenial(member, 'b', undefined, projects)).toBe(OUT_OF_SCOPE_MESSAGE);
+    expect(explainManagerNotesDenial(member, undefined, undefined, projects)).toBe(OUT_OF_SCOPE_MESSAGE);
+    expect(explainManagerNotesDenial(orchestrator, 'b', undefined, projects)).toBe(OUT_OF_SCOPE_MESSAGE);
+    expect(explainManagerNotesDenial({ kind: 'unassigned' }, 'a', undefined, projects)).toBe(OUT_OF_SCOPE_MESSAGE);
+    expect(explainManagerNotesDenial(portfolio, 'zzz', 'zzz', projects)).toBe(OUT_OF_SCOPE_MESSAGE);
+  });
+
+  it('canWriteManagerNotes outcomes are unchanged across the role matrix', () => {
+    const roles = [portfolio, member, orchestrator, { kind: 'unassigned' } as const];
+    const targets = [undefined, 'a', 'b', 'zzz'];
+    const elevations = [undefined, 'a', 'b', 'zzz'];
+    for (const role of roles) for (const target of targets) for (const elevated of elevations) {
+      const legacy = role.kind === 'portfolio'
+        ? target === undefined || (target === elevated && projects.find(p => p.id === target)?.orchestratorEnabled === false)
+        : role.kind === 'project-orchestrator' && target === role.projectId;
+      expect(canWriteManagerNotes(role, target, elevated, projects)).toBe(legacy);
+    }
   });
 });

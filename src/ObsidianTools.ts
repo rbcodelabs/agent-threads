@@ -255,6 +255,11 @@ export interface ObsidianMcpServerOptions {
   /** Central coordination boundary. False must be reported without target disclosure. */
   authorizeThread?: (threadId: string, elevatedProjectId: string | undefined, operation: 'read' | 'write' | 'notes') => boolean;
   /**
+   * Optional: why a Manager notes write to this thread is denied (undefined when allowed or
+   * unknown). Lets denials be self-explanatory without changing `authorizeThread`'s boolean.
+   */
+  explainNotesDenial?: (threadId: string, elevatedProjectId: string | undefined) => string | undefined;
+  /**
    * Authorizes the requested destination Project for reassignment. `targetThreadId` lets
    * the implementation detect self-assignment, which an unassigned thread is allowed to do
    * even though it may not move any other thread into a Project. Omitted for call sites

@@ -122,7 +122,7 @@ import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProj
 import { scheduleVaultThreadRecovery } from './vaultThreadRecovery';
 import { resolveProjectVaultRoot } from './projectPaths';
 import { stripLegacyOrchestratorHeartbeats } from './legacyHeartbeats';
-import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, canWriteManagerNotes, repairStaleProjectOrchestrators, resolveCoordinationRole } from './coordinationScope';
+import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, canWriteManagerNotes, explainManagerNotesDenial, repairStaleProjectOrchestrators, resolveCoordinationRole } from './coordinationScope';
 import { resolveOrchestratorLedgerPath } from './orchestratorCharter';
 import {
   sharedPersistenceWriterFence,
@@ -914,6 +914,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
             if (operation === 'notes') return canWriteManagerNotes(role, target.projectId, elevatedProjectId, projects);
             return authorizeThreadAccess(role, target.projectId, elevatedProjectId);
           },
+          explainNotesDenial: (targetId, elevatedProjectId) => {
+            const caller = this.manager.getThread(threadId);
+            const target = this.manager.getThread(targetId);
+            if (!caller || !target) return undefined;
+            const projects = this.manager.getProjects();
+            const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, projects);
+            return explainManagerNotesDenial(role, target.projectId, elevatedProjectId, projects);
+          },
           authorizeProjectDestination: (projectId, elevatedProjectId, targetThreadId) => {
             const caller = this.manager.getThread(threadId);
             if (!caller) return false;
@@ -1089,8 +1097,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
             }
             const projects = this.manager.getProjects();
             const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, projects);
-            if (!canWriteManagerNotes(role, targetProjectId, params.elevatedProjectId, projects)) {
-              throw new Error('Target is outside coordination scope.');
+            const notesDenial = explainManagerNotesDenial(role, targetProjectId, params.elevatedProjectId, projects);
+            if (notesDenial) {
+              throw new Error(notesDenial);
             }
             const project = targetProjectId !== undefined ? this.manager.getProject(targetProjectId) : undefined;
             if (targetProjectId !== undefined && !project) {
