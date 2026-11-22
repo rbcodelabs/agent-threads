@@ -72,6 +72,22 @@ export function resolveOrchestratorLedgerPath(projectName?: string | null): stri
   return `Products/${sanitizeLedgerSegment(projectName)}/orchestrator-ledger.md`;
 }
 
+const NOTES_V2_FIELDS =
+  '`Orchestrator state: v2`, `Project outcome`, `Goal status`, `Thread outcome`, `Strategy`, `Done when`, `Constraints`, exact `Last reviewed update` cursor, `Last substantive change`, `Last intervention`, `Decision unlocked`, `Staged for update`, `Staged`, `Disposition`, `Status`';
+
+const CHANNEL_1_BASE =
+  '1. `threads_create`: Spawn a bounded worker thread on the Agent Board (one PR, bug, investigation, or verification gate per card) when requested by Rick or required by an active Campaign Goal';
+
+// Manager notes and ledger writes are owner-scoped (see canWriteManagerNotes), so the Portfolio
+// orchestrator cannot seed notes in a Project whose own orchestrator is enabled; it hands off instead.
+const CHANNEL_1_PROJECT = `${CHANNEL_1_BASE}; immediately seed its Manager notes v2 with \`threads_set_notes\`.`;
+const CHANNEL_1_PORTFOLIO =
+  `${CHANNEL_1_BASE}. Notes are owner-scoped: seed them with \`threads_set_notes\` only on unassigned threads, or on a Project thread when \`elevatedProjectId\` matches and that Project's orchestrator is disabled. ` +
+  'For a Project with an enabled orchestrator, put the goal contract (outcome, done-when, constraints) in the create prompt, send ONE `threads_send_message` (matching `elevatedProjectId`) naming the new thread so that orchestrator seeds and owns its notes, and record the thread in your own ledger instead of notes.';
+
+const CHANNEL_5_PROJECT = `5. \`threads_set_notes\`: Commit Manager notes v2 (${NOTES_V2_FIELDS}) on every reviewed or touched thread in your own Project. Notes and ledger writes are owner-scoped.`;
+const CHANNEL_5_PORTFOLIO = `5. \`threads_set_notes\`: Commit Manager notes v2 (${NOTES_V2_FIELDS}) only on threads you own: unassigned threads, or Project threads whose orchestrator is disabled (matching \`elevatedProjectId\`). Never write notes or ledger in a Project with an enabled orchestrator; elevation does not permit it.`;
+
 /**
  * Invariant ~420-token Orchestrator Charter pinned into `appendSystemPrompt`
  * across all harnesses whenever a thread holds an orchestrator role. Survives
@@ -92,11 +108,11 @@ export function buildOrchestratorCharter(role: OrchestratorRole): string {
     '- NEVER edit code, run shell/build/test commands, manage git worktrees, poll with `ScheduleWakeup`, or spawn internal subagents. Every investigation, fix, rebase, or gate check belongs in its own visible Agent Board worker thread.',
     '',
     '### 5-Channel Action Contract',
-    '1. `threads_create`: Spawn a bounded worker thread on the Agent Board (one PR, bug, investigation, or verification gate per card) when requested by Rick or required by an active Campaign Goal; immediately seed its Manager notes v2 with `threads_set_notes`.',
+    role.kind === 'project' ? CHANNEL_1_PROJECT : CHANNEL_1_PORTFOLIO,
     '2. `threads_send_message`: Direct orchestrator-to-worker tactical handoff ONLY inside an already-authorized Campaign Goal and within Rick\'s stated boundaries (for example rebasing onto a merged dependency SHA or running required gates). Never use it to approve your own proposal, answer product/UX/scope questions addressed to Rick, or authorize irreversible actions.',
     '3. `threads_set_proposed_reply`: Stage Rick\'s reply whenever a thread is waiting on Rick with a clear recommended answer (at most one pending item per thread: a staged reply OR a decision, never both).',
     '4. `threads_post_decision`: Post an inline Decision card (2–4 options) for genuine forks, scope/priority tradeoffs, or ANY irreversible action (merge, deploy, release, production migration, force-push, deleting data, spending money, outward-facing messages) unless Rick already explicitly authorized that exact action.',
-    '5. `threads_set_notes`: Commit Manager notes v2 (`Orchestrator state: v2`, `Project outcome`, `Goal status`, `Thread outcome`, `Strategy`, `Done when`, `Constraints`, exact `Last reviewed update` cursor, `Last substantive change`, `Last intervention`, `Decision unlocked`, `Staged for update`, `Staged`, `Disposition`, `Status`) on every reviewed or touched thread.',
+    role.kind === 'project' ? CHANNEL_5_PROJECT : CHANNEL_5_PORTFOLIO,
     '',
     '### Two-Tier Memory & 30+ Thread Scale',
     '- **Event pings (`O(1)`):** Call `threads_get` for only the named changed thread(s) instead of scanning all threads.',

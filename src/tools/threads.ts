@@ -13,6 +13,14 @@ import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 
 type ToolDef = SdkMcpToolDefinition<any>;
 
+const ELEVATION_DESC =
+  'Portfolio orchestrator only: explicit Project elevation, applied to this call alone (it is not remembered). ' +
+  'It does NOT permit manager notes or ledger writes in a Project whose own orchestrator is enabled; message that orchestrator instead.';
+
+const ELEVATION_NOTES_DESC =
+  'Portfolio orchestrator only: Project ID for this call alone. Notes/ledger writes in that Project are allowed only when its orchestrator is disabled (enabled: false). ' +
+  'If its orchestrator is enabled the write is denied: hand off with threads_send_message (same elevatedProjectId) so the owner writes it.';
+
 export interface ThreadToolsPort {
   options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeOrchestratorManagement' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadDecision' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'explainNotesDenial' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorLedger' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'listOrchestrators' | 'openThread' | 'postThreadDecision' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setOrchestratorLedger' | 'setProjectOrchestratorEnabled' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
 }
@@ -27,6 +35,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
       'The new thread inherits the current thread\'s working directory and project when those fields are omitted.',
       'Pass projectId: null to create the thread without a project.',
       'Targeting a different project or working directory than the current thread requires user approval and errors if denied.',
+      'Creating a thread does not grant notes ownership: when the Portfolio orchestrator creates a thread in a Project with an enabled orchestrator, put the goal contract in the prompt and send that orchestrator one threads_send_message so it seeds the notes.',
       'Returns as soon as the prompt is queued; use threads_wait to wait for its response.',
     ].join(' '),
     {
@@ -40,7 +49,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         .describe(
           'Optional project ID override. Omit to inherit the current project; pass null to create without a project.',
         ),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this creation.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       if (!options.createThread) {
@@ -99,7 +108,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     {
       threadId: z.string().describe('ID of the thread to inspect'),
       recentMessages: z.number().int().min(0).max(50).optional().describe('Optional count of most recent non-compact messages to include (0 or omitted omits messages)'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -237,7 +246,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
       description: z.string().nullable().optional().describe('New Project context description; null clears it'),
       cwdOverride: z.string().nullable().optional().describe('New absolute filesystem cwd; null restores the vault-derived cwd'),
       overviewPath: z.string().nullable().optional().describe('Vault-relative path of the Project overview note injected into the system prompt; null restores the default <vaultFolder>/_overview.md'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit matching Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -297,7 +306,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         .nullable()
         .describe('Project ID to assign to the thread, or null to clear the project assignment'),
       alignCwd: z.boolean().optional().describe('Also switch the thread to the Project cwd and start a fresh session on the next turn. Defaults to false.'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -329,7 +338,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     {
       threadId: z.string().describe('ID of the thread to read'),
       limit: z.number().int().positive().optional().describe('Return only the last N messages (default 20)'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -356,7 +365,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     'Opens and focuses a thread by its exact ID. A successful open marks the thread reviewed and persists the active selection.',
     {
       threadId: z.string().describe('ID of the thread to open'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -384,7 +393,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
       threadId: z.string().optional().describe('ID of the thread whose log to read. Defaults to the current thread.'),
       limit: z.number().int().nonnegative().optional().describe('Return only the most recent N entries (default 100). Pass 0 for all entries. Type filtering is applied before tailing.'),
       type: z.string().optional().describe('Only return entries with this envelope type, e.g. "assistant", "user", "result", "system", "session_start", "tool_use_summary".'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -414,7 +423,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     {
       threadId: z.string().describe('ID of the thread to wait for'),
       timeoutSeconds: z.number().optional().describe('Maximum seconds to wait before giving up (default 120)'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -453,7 +462,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     {
       threadId: z.string().describe('ID of the thread to send the message to'),
       message: z.string().describe('The message text to send'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -485,7 +494,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     {
       threadId: z.string().describe('ID of the thread to archive'),
       confirm: z.boolean().optional().describe('Must be true to archive the orchestrator thread (the thread tracked in settings.orchestratorThreadId). Not required for any other thread.'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -527,11 +536,13 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
       'Sets (overwrites) a thread\'s orchestrator tracking notes — free-form text for',
       'inferred goal, status, and a last-reviewed cursor. Visible in the UI but never',
       'injected into any session\'s context. Pass an empty string to clear.',
+      'Notes are owner-scoped: a Project orchestrator writes only in its own Project; the Portfolio orchestrator writes only on unassigned threads,',
+      'or on Project threads when elevatedProjectId matches and that Project\'s orchestrator is disabled.',
     ].join(' '),
     {
       threadId: z.string().describe('ID of the thread to annotate'),
       notes: z.string().describe('Tracking notes text. Pass an empty string to clear existing notes.'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: pass the Project ID to write notes when that Project\'s orchestrator is disabled (enabled: false).'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_NOTES_DESC),
     },
     async (args, _extra) => {
       try {
@@ -562,7 +573,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     {
       threadId: z.string().describe('ID of the thread to propose a reply for'),
       text: z.string().describe('The proposed reply text'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -595,7 +606,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     'Clears a thread\'s pending proposed reply, if any, without sending it. Use this when a prior proposal is stale or no longer relevant.',
     {
       threadId: z.string().describe('ID of the thread to clear the proposed reply on'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -633,7 +644,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
       })).min(2).max(4).describe('2-4 mutually exclusive (or multi-select) options'),
       multiSelect: z.boolean().optional().describe('Allow choosing more than one option (default false)'),
       allowOther: z.boolean().optional().describe('Offer a free-text Other answer (default true)'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -667,7 +678,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     {
       threadId: z.string().optional().describe('Thread the decision was posted on. Defaults to the current thread.'),
       decisionId: z.string().describe('The decisionId returned by threads_post_decision'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -742,7 +753,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     'Reads the Tier 2 cross-thread campaign ledger note in the vault (Products/<Project>/orchestrator-ledger.md, or Products/Portfolio/orchestrator-ledger.md for unassigned portfolio scope). Defaults to the caller\'s Project when projectId is omitted.',
     {
       projectId: z.string().nullable().optional().describe('Optional Project ID (or null for Portfolio ledger). Omit to read your own scope\'s ledger.'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation when reading a Project ledger.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_DESC),
     },
     async (args, _extra) => {
       try {
@@ -758,11 +769,11 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
 
   const boundSetLedger = tool(
     'threads_set_ledger',
-    'Writes (or clears with an empty string) the caller-owned Tier 2 cross-thread campaign ledger note in the vault (Products/<Project>/orchestrator-ledger.md or Products/Portfolio/orchestrator-ledger.md). Use this instead of filesystem Write/Edit to maintain PR waves, cross-thread blockers, and merge order.',
+    'Writes (or clears with an empty string) the caller-owned Tier 2 cross-thread campaign ledger note in the vault (Products/<Project>/orchestrator-ledger.md or Products/Portfolio/orchestrator-ledger.md). Use this instead of filesystem Write/Edit to maintain PR waves, cross-thread blockers, and merge order. Ledger writes are owner-scoped: the Portfolio orchestrator may write a Project ledger only with a matching elevatedProjectId and only when that Project\'s orchestrator is disabled.',
     {
       content: z.string().max(MAX_LEDGER_CHARS).describe('Markdown ledger content (max 64 KiB). Pass an empty string to clear.'),
       projectId: z.string().nullable().optional().describe('Optional Project ID (or null for Portfolio ledger). Omit to write your own scope\'s ledger.'),
-      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: pass the Project ID when writing a disabled Project\'s ledger.'),
+      elevatedProjectId: z.string().optional().describe(ELEVATION_NOTES_DESC),
     },
     async (args, _extra) => {
       try {
