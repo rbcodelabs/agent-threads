@@ -53,6 +53,24 @@ describe('orchestratorCharter pure helpers', () => {
     expect(project).toContain('Products/Compass/orchestrator-ledger.md');
   });
 
+  it('gives each role accurate owner-scoped notes wording (create-then-handoff for Portfolio)', () => {
+    const portfolio = buildOrchestratorCharter({ kind: 'portfolio' });
+    expect(portfolio).toContain('owner-scoped');
+    expect(portfolio).toContain('that Project\'s orchestrator is disabled');
+    expect(portfolio).toContain('goal contract (outcome, done-when, constraints) in the create prompt');
+    expect(portfolio).toContain('ONE `threads_send_message` (matching `elevatedProjectId`)');
+    expect(portfolio).toContain('record the thread in your own ledger instead of notes');
+    expect(portfolio).toContain('elevation does not permit it');
+    expect(portfolio).not.toContain('immediately seed its Manager notes');
+    expect(portfolio).not.toContain('on every reviewed or touched thread');
+
+    const project = buildOrchestratorCharter({ kind: 'project', projectId: 'p1', projectName: 'Compass' });
+    expect(project).toContain('immediately seed its Manager notes v2 with `threads_set_notes`');
+    expect(project).toContain('on every reviewed or touched thread in your own Project');
+    expect(project).not.toContain('ONE `threads_send_message`');
+    expect(project).not.toContain('elevation does not permit it');
+  });
+
   it('reframes /goal on an orchestrator as a coordination campaign goal rather than direct execution', () => {
     const text = buildOrchestratorGoalContext('Integrate PRs #594–#617');
     expect(text).toContain('## Active Campaign Goal');

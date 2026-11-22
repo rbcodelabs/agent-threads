@@ -30,6 +30,26 @@ describe('coordination tool scoping', () => {
     expect(denied.content[0]!.text).toContain('outside coordination scope');
   });
 
+  it('documents per-call elevation and owner-scoped notes in tool descriptions', () => {
+    const server = createClaudeThreadsMcpServers(app, {}).claude_threads as unknown as { tools: Array<{ name: string; description: string; inputSchema: Record<string, { description?: string }> }> };
+    const byName = (name: string) => server.tools.find(candidate => candidate.name === name)!;
+
+    const create = byName('threads_create');
+    expect(create.description).toContain('does not grant notes ownership');
+    expect(create.description).toContain('threads_send_message');
+    expect(create.inputSchema.elevatedProjectId!.description).toContain('this call alone');
+    expect(create.inputSchema.elevatedProjectId!.description).toContain('whose own orchestrator is enabled');
+
+    const notes = server.tools.find(candidate => candidate.name === 'threads_set_notes' || candidate.name === 'obsidian_set_thread_notes')!;
+    expect(notes.description).toContain('owner-scoped');
+    expect(notes.inputSchema.elevatedProjectId!.description).toContain('this call alone');
+    expect(notes.inputSchema.elevatedProjectId!.description).toContain('orchestrator is enabled');
+
+    const ledger = byName('threads_set_ledger');
+    expect(ledger.description).toContain('owner-scoped');
+    expect(ledger.inputSchema.elevatedProjectId!.description).toContain('threads_send_message');
+  });
+
   it('requires authorization for both reassignment source and destination', async () => {
     const authorizeThread = vi.fn().mockReturnValue(true);
     const authorizeProjectDestination = vi.fn().mockReturnValue(false);
