@@ -105,6 +105,45 @@ describe('Claude Threads public API v1 contract', () => {
     expect(threads.get(thread.id).messages[0].content).toBe('Original');
   });
 
+  it('projects pendingDecisions onto the snapshot only, as a trimmed detached copy', async () => {
+    const { service, addThread, threads } = makeHarness();
+    const internal = { id: 'dec-1', question: 'Ship?', header: 'Release', options: [{ label: 'Ship', description: 'go', secret: 'x' }, { label: 'Hold', description: '' }],
+      multiSelect: false, allowOther: true, recommended: 'Ship', createdAt: 99, sourceThreadId: 'orch', privateField: 'nope' };
+    const thread = addThread({ messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }], pendingDecisions: [internal] });
+    const snapshot = await service.api.threads.get(thread.id) as any;
+    expect(snapshot.pendingDecisions).toEqual([{ id: 'dec-1', header: 'Release', question: 'Ship?', options: [{ label: 'Ship', description: 'go' }, { label: 'Hold', description: '' }],
+      multiSelect: false, allowOther: true, recommended: 'Ship', sourceThreadId: 'orch', createdAt: 99 }]);
+    expect(JSON.stringify(snapshot.pendingDecisions)).not.toMatch(/privateField|secret|messages/);
+    expect(Object.isFrozen(snapshot.pendingDecisions)).toBe(true);
+    expect(Object.isFrozen(snapshot.pendingDecisions[0].options)).toBe(true);
+    expect(snapshot.pendingDecisions[0]).not.toBe(internal);
+    expect(snapshot.pendingDecisions[0].options).not.toBe(internal.options);
+    internal.question = 'Changed'; internal.options[0].label = 'Mutated';
+    expect(snapshot.pendingDecisions[0].question).toBe('Ship?');
+    expect(snapshot.pendingDecisions[0].options[0].label).toBe('Ship');
+    expect(() => { snapshot.pendingDecisions[0].question = 'x'; }).toThrow();
+    expect(threads.get(thread.id).pendingDecisions[0]).toBe(internal);
+    const [summary] = (await service.api.threads.list()).filter(t => t.id === thread.id) as any[];
+    expect('pendingDecisions' in summary).toBe(false);
+  });
+
+  it('omits pendingDecisions entirely when none are pending and leaves recommended/sourceThreadId off legacy decisions', async () => {
+    const { service, addThread } = makeHarness();
+    const none = addThread({});
+    const emptied = addThread({ pendingDecisions: [] });
+    expect('pendingDecisions' in (await service.api.threads.get(none.id) as any)).toBe(false);
+    expect('pendingDecisions' in (await service.api.threads.get(emptied.id) as any)).toBe(false);
+    const legacy = addThread({ pendingDecisions: [{ id: 'old', question: 'Q?', header: '', options: [{ label: 'A', description: '' }, { label: 'B', description: '' }], multiSelect: true, allowOther: false, createdAt: 5 }] });
+    const decision = (await service.api.threads.get(legacy.id) as any).pendingDecisions[0];
+    expect('recommended' in decision).toBe(false);
+    expect('sourceThreadId' in decision).toBe(false);
+    expect(decision).toMatchObject({ id: 'old', multiSelect: true, allowOther: false, createdAt: 5 });
+  });
+
+  it('advertises the threads.pendingDecisions capability', () => {
+    expect(makeHarness().service.api.capabilities).toContain('threads.pendingDecisions');
+  });
+
   it('filters queries without leaking excluded internal fields', async () => {
     const { service, addThread } = makeHarness();
     addThread({ id: 'a', projectId: 'p1', status: 'waiting', rawLogPath: 'secret.jsonl', managerNotes: 'private' });

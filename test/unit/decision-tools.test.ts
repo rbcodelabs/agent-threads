@@ -38,6 +38,20 @@ describe('threads_post_decision / threads_clear_decision', () => {
     }));
   });
 
+  it('passes the optional recommended label through, and omits it when absent', async () => {
+    const postThreadDecision = vi.fn().mockReturnValue('dec-1');
+    const handler = find({ threadId: 'orch', postThreadDecision }, 'threads_post_decision');
+    await handler({ question: 'Ship?', options: OPTIONS, recommended: 'Ship' });
+    expect(postThreadDecision).toHaveBeenLastCalledWith('orch', expect.objectContaining({ recommended: 'Ship' }));
+    await handler({ question: 'Ship?', options: OPTIONS });
+    expect(postThreadDecision.mock.calls[1][1].recommended).toBeUndefined();
+  });
+
+  it('declares recommended as an optional param on the tool', () => {
+    const def = tools({ threadId: 'orch' }).find((t) => t.name === 'threads_post_decision') as unknown as { inputSchema: Record<string, { isOptional: () => boolean }> };
+    expect(def.inputSchema.recommended.isOptional()).toBe(true);
+  });
+
   it('requires write authorization for another thread and does not post when denied', async () => {
     const authorizeThread = vi.fn().mockReturnValue(false);
     const postThreadDecision = vi.fn();

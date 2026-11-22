@@ -86,3 +86,41 @@ describe('decision lifecycle', () => {
     expect(formatDecisionAnswer(d, ' Ship ', { id: 't1', title: 'Fix login' })).toBe('Decision Release (about thread "Fix login" t1) [d9]: Ship');
   });
 });
+
+describe('decision recommended option', () => {
+  it('stores a recommended label that matches an option (trimmed)', () => {
+    const t = holder();
+    const d = postDecision(t, 'orch', { ...input, recommended: '  Ship ' }, 1, () => 'd1');
+    expect(d.recommended).toBe('Ship');
+    expect(t.pendingDecisions![0].recommended).toBe('Ship');
+  });
+
+  it('omits the field entirely when recommended is not given or blank', () => {
+    const a = postDecision(holder(), 'orch', input, 1, () => 'd1');
+    const b = postDecision(holder(), 'orch', { ...input, recommended: '   ' }, 1, () => 'd2');
+    expect('recommended' in a).toBe(false);
+    expect('recommended' in b).toBe(false);
+  });
+
+  it.each([['an unknown label', 'Nope'], ['a different case', 'ship']])('rejects %s', (_l, rec) => {
+    const t = holder();
+    expect(() => postDecision(t, 'orch', { ...input, recommended: rec })).toThrow(/recommended.*Ship, Hold/);
+    expect(t.pendingDecisions).toBeUndefined();
+  });
+
+  it('legacy persisted decisions without the field still clear, render and format', () => {
+    const legacy = { id: 'old', question: 'Q?', header: 'H', options: opts, multiSelect: false, allowOther: true, createdAt: 1, sourceThreadId: 'orch' };
+    const t: Pick<Thread, 'pendingDecisions'> = { pendingDecisions: [legacy] };
+    expect(decisionToQuestion(legacy).options).toEqual(opts);
+    expect(formatDecisionAnswer(legacy, 'Ship')).toContain('[old]');
+    expect(clearDecision(t, 'orch', 'old')).toBe(true);
+    expect(t.pendingDecisions).toBeUndefined();
+  });
+
+  it('survives a JSON persistence round trip', () => {
+    const t = holder();
+    postDecision(t, 'orch', { ...input, recommended: 'Hold' }, 1, () => 'd1');
+    const restored = JSON.parse(JSON.stringify(t)) as typeof t;
+    expect(restored.pendingDecisions![0].recommended).toBe('Hold');
+  });
+});
