@@ -7393,8 +7393,7 @@ textarea.ct-settings-wide-input {
 /* One row, as in the mock: the dot already reports needs-you, so the "Only needs you" chip yields its room to the orb. */
 /* Compound selectors outrank `.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-agents-panel-meta { flex-wrap: wrap }`. */
 .ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) { flex-wrap: nowrap; }
-.ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) .ct-kanban-needs-chip,
-.ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) .ct-kanban-concluded-chip { display: none; }
+.ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) .ct-kanban-needs-chip { display: none; }
 
 /* Mobile: 44px targets (same rule as the New thread button). */
 /* Narrow status row: same content as the pill's field, full width, ABOVE the orb / New row inside the pill. */
@@ -11224,6 +11223,7 @@ button.ct-agent-crumb:focus-visible {
 }
 
 /* Quiet threads: one collapsed "Concluded (N)" row per project column / one lane on the status board. */
+.ct-kanban-concluded-show { align-self: flex-start; padding: 0 8px; min-height: 24px; background: transparent; border: none; box-shadow: none; color: var(--text-muted); font-size: var(--font-ui-smaller); cursor: pointer; text-decoration: underline; }
 .ct-kanban-col-concluded { min-width: 220px; }
 .ct-kanban-concluded { display: flex; flex-direction: column; gap: 6px; }
 .ct-kanban-concluded-head {

@@ -153,7 +153,6 @@ export class KanbanView extends ItemView {
   private notesEls: Map<string, HTMLElement> = new Map();
   private needsYouOnlyBtn!: HTMLButtonElement;
   private needsYouOnly = false;
-  private showConcludedBtn!: HTMLButtonElement;
   /** Concluded rows the user expanded: 'status' or a project column key. In memory only. */
   private expandedConcluded = new Set<string>();
   private activeThreadId: string | null = null;
@@ -346,21 +345,6 @@ export class KanbanView extends ItemView {
       this.needsYouOnly = !this.needsYouOnly;
       this.needsYouOnlyBtn.toggleClass('ct-kanban-needs-chip-active', this.needsYouOnly);
       this.needsYouOnlyBtn.setAttribute('aria-pressed', String(this.needsYouOnly));
-      this.render();
-    });
-
-    const showConcluded = this.plugin.settings.kanbanShowConcluded === true;
-    this.showConcludedBtn = metaActions.createEl('button', {
-      cls: 'ct-kanban-needs-chip ct-kanban-concluded-chip' + (showConcluded ? ' ct-kanban-needs-chip-active' : ''),
-      text: 'Show concluded',
-      attr: { type: 'button', 'aria-pressed': String(showConcluded), 'data-testid': 'kanban-show-concluded-toggle', title: 'Show concluded threads in their usual columns instead of collapsing them' },
-    });
-    this.showConcludedBtn.addEventListener('click', () => {
-      const next = this.plugin.settings.kanbanShowConcluded !== true;
-      this.plugin.settings.kanbanShowConcluded = next;
-      void this.plugin.saveSettings();
-      this.showConcludedBtn.toggleClass('ct-kanban-needs-chip-active', next);
-      this.showConcludedBtn.setAttribute('aria-pressed', String(next));
       this.render();
     });
 
@@ -800,8 +784,8 @@ export class KanbanView extends ItemView {
    * suspended while searching (matches render normally) or when "Show
    * concluded" is on. Folder swimlanes and gallery are deliberately untouched.
    */
-  private quietingActive(): boolean {
-    if (this.plugin.settings.kanbanShowConcluded === true || this.searchQuery) return false;
+  private quietingActive(ignoreToggle = false): boolean {
+    if ((!ignoreToggle && this.plugin.settings.kanbanShowConcluded === true) || this.searchQuery) return false;
     const mode = this.groupBy;
     return mode === 'status' || mode === 'project';
   }
@@ -811,8 +795,8 @@ export class KanbanView extends ItemView {
     return this.manager.getProjects().some((p) => p.orchestratorThreadId === thread.id);
   }
 
-  private isQuiet(thread: Thread): boolean {
-    if (!this.quietingActive()) return false;
+  private isQuiet(thread: Thread, ignoreToggle = false): boolean {
+    if (!this.quietingActive(ignoreToggle)) return false;
     const m = this.manager;
     return isQuietThread(thread, {
       isRunning: m.isRunning(thread.id),
@@ -851,9 +835,35 @@ export class KanbanView extends ItemView {
       else this.expandedConcluded.add(expandKey);
       this.render();
     });
+    const showAll = row.createEl('button', {
+      cls: 'ct-kanban-concluded-show', text: 'Show in columns',
+      attr: { type: 'button', 'aria-pressed': 'false', 'data-testid': 'kanban-show-concluded-toggle', title: 'Show concluded threads in their usual columns instead of collapsing them' },
+    });
+    showAll.addEventListener('click', () => this.setShowConcluded(true));
     if (!expanded) return;
     const body = row.createDiv('ct-kanban-concluded-body');
     for (const thread of sorted) this.renderCard(thread, this.rowStateFor(thread), body, placementKey);
+  }
+
+  private setShowConcluded(on: boolean): void {
+    this.plugin.settings.kanbanShowConcluded = on;
+    void this.plugin.saveSettings();
+    this.render();
+  }
+
+  /** Shown while "Show concluded" is on and quiet-eligible threads are in their usual columns: the way back to collapsing. */
+  private renderConcludedShownBar(parent: HTMLElement, threads: Thread[]): void {
+    if (this.plugin.settings.kanbanShowConcluded !== true) return;
+    const n = partitionQuiet(threads, (t) => this.isQuiet(t, true)).quiet.length;
+    if (n === 0) return;
+    const bar = parent.createDiv({ cls: 'ct-kanban-concluded', attr: { 'data-testid': 'kanban-concluded-shown' } });
+    const btn = bar.createEl('button', {
+      cls: 'ct-kanban-concluded-head',
+      attr: { type: 'button', 'aria-pressed': 'true', 'data-testid': 'kanban-show-concluded-toggle', title: 'Collapse concluded threads again' },
+    });
+    btn.createSpan({ cls: 'ct-kanban-concluded-label', text: `Concluded shown (${n})` });
+    btn.createSpan({ cls: 'ct-kanban-concluded-newest', text: 'Collapse' });
+    btn.addEventListener('click', () => this.setShowConcluded(false));
   }
 
   /** The card RowState a thread has by its own status, ignoring the Needs you lane. */
@@ -917,6 +927,9 @@ export class KanbanView extends ItemView {
       const body = lane.createDiv('ct-kanban-col-body');
       body.dataset.scrollKey = CONCLUDED_LABEL;
       this.renderConcludedRow(body, quiet, 'status', CONCLUDED_LABEL);
+    } else if (this.plugin.settings.kanbanShowConcluded === true && partitionQuiet(threads, (t) => this.isQuiet(t, true)).quiet.length > 0) {
+      const lane = board.createDiv('ct-kanban-col ct-kanban-col-concluded');
+      this.renderConcludedShownBar(lane.createDiv('ct-kanban-col-body'), threads);
     }
   }
 
@@ -1038,6 +1051,8 @@ export class KanbanView extends ItemView {
     }
     if (quiet.length > 0) {
       this.renderConcludedRow(body, quiet, groupKey, `${groupKey}::${CONCLUDED_LABEL}`);
+    } else {
+      this.renderConcludedShownBar(body, threads);
     }
   }
 

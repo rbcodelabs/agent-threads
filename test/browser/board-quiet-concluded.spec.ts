@@ -27,7 +27,7 @@ async function open(page: Page, size: { width: number; height: number }, groupBy
 
 const card = (page: Page, title: string) => page.locator('.ct-kanban-card-title', { hasText: title });
 const row = (page: Page) => page.getByTestId('kanban-concluded-row');
-const toggle = (page: Page) => page.getByTestId('kanban-show-concluded-toggle');
+const toggle = (page: Page) => page.getByTestId('kanban-show-concluded-toggle').first();
 
 test.describe('board: quiet concluded threads', () => {
   test('status board: collapsed Concluded (3) lane, failed stays visible, expand and toggle', async ({ page }) => {
@@ -57,6 +57,7 @@ test.describe('board: quiet concluded threads', () => {
     await toggle(page).click();
     await expect(toggle(page)).toHaveAttribute('aria-pressed', 'true');
     await expect(row(page)).toHaveCount(0);
+    await expect(page.getByTestId('kanban-concluded-shown')).toHaveCount(1);
     await expect(card(page, 'Fix auth middleware 401s')).toHaveCount(1);
     await expect(card(page, 'Kanban folder swimlanes')).toHaveCount(1);
     await toggle(page).click();
