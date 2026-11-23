@@ -80,24 +80,34 @@ export interface BulkArchiveDeps {
   /** Re-evaluated at confirm time, per id. */
   isStillEligible: (id: string) => boolean;
   isOrchestrator: (id: string) => boolean;
+  /** False when the thread is gone from the board (distinct from "changed"). */
+  exists?: (id: string) => boolean;
   archiveThread: (id: string) => Promise<void>;
+  /** archiveThread does not persist; called once, only when at least one thread was archived. */
+  persist?: () => Promise<void>;
 }
 
 export interface BulkArchiveResult {
   confirmed: boolean;
   archived: string[];
-  /** Eligibility lost since the list was opened (changed, un-quieted, gone, or an orchestrator). */
+  /** Eligibility lost since the list was opened (changed, un-quieted, or an orchestrator). */
   skipped: string[];
+  /** No longer on the board at all. */
+  missing: string[];
   failed: string[];
 }
 
 /** Archives the selected ids sequentially, only after confirm, only those still eligible. */
 export async function runBulkArchive(selectedIds: readonly string[], deps: BulkArchiveDeps): Promise<BulkArchiveResult> {
-  const result: BulkArchiveResult = { confirmed: false, archived: [], skipped: [], failed: [] };
+  const result: BulkArchiveResult = { confirmed: false, archived: [], skipped: [], missing: [], failed: [] };
   if (selectedIds.length === 0) return result;
   if (!(await deps.confirm())) return result;
   result.confirmed = true;
   for (const id of selectedIds) {
+    if (deps.exists && !deps.exists(id)) {
+      result.missing.push(id);
+      continue;
+    }
     if (deps.isOrchestrator(id) || !deps.isStillEligible(id)) {
       result.skipped.push(id);
       continue;
@@ -105,10 +115,12 @@ export async function runBulkArchive(selectedIds: readonly string[], deps: BulkA
     try {
       await deps.archiveThread(id);
       result.archived.push(id);
-    } catch {
+    } catch (err) {
+      console.warn('[agent-threads] bulk archive failed for thread', id, err);
       result.failed.push(id);
     }
   }
+  if (result.archived.length > 0 && deps.persist) await deps.persist();
   return result;
 }
 
@@ -117,6 +129,7 @@ export function bulkArchiveSummary(r: BulkArchiveResult): string {
   if (!r.confirmed) return '';
   const parts = [`Archived ${r.archived.length} thread${r.archived.length === 1 ? '' : 's'}`];
   if (r.skipped.length > 0) parts.push(`${r.skipped.length} skipped, changed since you opened the list`);
+  if (r.missing.length > 0) parts.push(`${r.missing.length} no longer on the board`);
   if (r.failed.length > 0) parts.push(`${r.failed.length} failed`);
   return parts.join('. ') + '.';
 }

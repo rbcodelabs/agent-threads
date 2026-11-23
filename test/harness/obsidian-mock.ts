@@ -350,14 +350,22 @@ export class Modal {
     this.overlay.appendChild(this.container);
   }
 
+  private onDocKeydown = (e: KeyboardEvent) => {
+    // Obsidian closes only the topmost modal on Escape.
+    if (e.key === 'Escape' && Array.from(document.body.querySelectorAll('.modal-overlay')).pop() === this.overlay) this.close();
+  };
+
   open(): void {
     document.body.appendChild(this.overlay);
+    document.addEventListener('keydown', this.onDocKeydown);
+    this.overlay.addEventListener('click', (e) => { if (e.target === this.overlay) this.close(); });
     this.onOpen();
   }
 
   onOpen(): void {}
 
   close(): void {
+    document.removeEventListener('keydown', this.onDocKeydown);
     if (this.overlay.parentNode) {
       this.overlay.parentNode.removeChild(this.overlay);
     }

@@ -81,6 +81,8 @@ describe('runBulkArchive', () => {
     isStillEligible: vi.fn(() => true),
     isOrchestrator: vi.fn(() => false),
     archiveThread: vi.fn(async () => {}),
+    exists: vi.fn(() => true),
+    persist: vi.fn(async () => {}),
   });
 
   it('never archives when the confirm is declined', async () => {
@@ -114,8 +116,35 @@ describe('runBulkArchive', () => {
   it('records a failing archive and continues', async () => {
     const d = base();
     d.archiveThread.mockImplementation(async (id: string) => { if (id === 'a') throw new Error('x'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const r = await runBulkArchive(['a', 'b'], d);
     expect(r.archived).toEqual(['b']);
     expect(r.failed).toEqual(['a']);
+    expect(warn).toHaveBeenCalled();
+    expect(d.persist).toHaveBeenCalledTimes(1); // partial failure still persists the one that archived
+    warn.mockRestore();
+  });
+
+  it('persists exactly once after archiving, never when nothing archived or when declined', async () => {
+    const d = base();
+    await runBulkArchive(['a', 'b'], d);
+    expect(d.persist).toHaveBeenCalledTimes(1);
+    const none = base();
+    none.isStillEligible.mockReturnValue(false);
+    await runBulkArchive(['a'], none);
+    expect(none.persist).not.toHaveBeenCalled();
+    const declined = base();
+    declined.confirm.mockResolvedValue(false);
+    await runBulkArchive(['a'], declined);
+    expect(declined.persist).not.toHaveBeenCalled();
+  });
+
+  it('reports threads that no longer exist separately from changed ones', async () => {
+    const d = base();
+    d.exists.mockImplementation((id: string) => id !== 'gone');
+    d.isStillEligible.mockImplementation((id: string) => id !== 'changed');
+    const r = await runBulkArchive(['gone', 'changed', 'ok'], d);
+    expect(r).toMatchObject({ archived: ['ok'], skipped: ['changed'], missing: ['gone'] });
+    expect(bulkArchiveSummary(r)).toBe('Archived 1 thread. 1 skipped, changed since you opened the list. 1 no longer on the board.');
   });
 });

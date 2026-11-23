@@ -27,6 +27,7 @@ export class ArchiveSuggestionsModal extends Modal {
   private statusEl!: HTMLElement;
   private busy = false;
   private closedNotified = false;
+  private docKeydown = (e: KeyboardEvent) => this.trapTab(e);
 
   constructor(app: App, private deps: ArchiveSuggestionsDeps) {
     super(app);
@@ -58,23 +59,35 @@ export class ArchiveSuggestionsModal extends Modal {
     this.archiveBtn.addEventListener('click', () => { void this.archive(); });
 
     root.addEventListener('keydown', (e: KeyboardEvent) => this.onKeydown(e));
+    // Focus can fall to <body> (e.g. a confirm dialog dismissed by Escape or an outside click); the drawer's own
+    // listener would then never see Tab, so the trap also listens on the document while the drawer is open.
+    document.addEventListener('keydown', this.docKeydown, true);
     this.refresh();
     (this.listEl.querySelector<HTMLElement>('input') ?? selAll).focus({ preventScroll: true });
   }
 
   private onKeydown(e: KeyboardEvent): void {
+    if (this.busy) return; // a confirm dialog is on top and owns the keyboard
     if (e.key === 'Escape') {
       e.preventDefault();
       this.close();
       return;
     }
-    if (e.key !== 'Tab') return;
+    if (e.key === 'Tab') this.trapTab(e);
+  }
+
+  private trapTab(e: KeyboardEvent): void {
+    if (e.key !== 'Tab' || this.busy || e.defaultPrevented) return;
+    const active = document.activeElement;
+    const inside = !!active && this.contentEl.contains(active);
+    const lost = !active || active === document.body;
+    if (!inside && !lost) return; // focus is in another dialog
     // Keep Tab inside the drawer.
     const items = Array.from(this.contentEl.querySelectorAll<HTMLElement>(FOCUSABLE));
     if (items.length === 0) return;
     const first = items[0];
     const last = items[items.length - 1];
-    const active = document.activeElement;
+    if (lost) { e.preventDefault(); first.focus(); return; }
     if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
   }
@@ -115,17 +128,25 @@ export class ArchiveSuggestionsModal extends Modal {
       const result = await this.deps.archiveSelected([...this.selected]);
       if (result.confirmed) {
         this.statusEl.setText(bulkArchiveSummary(result));
-        this.selected = clearSelection();
+        // Failed threads stay selected so a retry is one click.
+        this.selected = new Set(result.failed);
       }
     } finally {
       this.busy = false;
       this.refresh();
-      // The confirm dialog and the re-render both drop focus; put it back inside the drawer.
-      (this.listEl.querySelector<HTMLElement>('input') ?? this.contentEl.querySelector<HTMLElement>('button'))?.focus({ preventScroll: true });
+      // The confirm dialog (however dismissed) and the re-render drop focus; put it back inside the drawer, and
+      // once more next frame to win the race with the dialog's own focus restore.
+      this.refocus();
+      requestAnimationFrame(() => { if (!this.closedNotified) this.refocus(); });
     }
   }
 
+  private refocus(): void {
+    (this.listEl.querySelector<HTMLElement>('input') ?? this.contentEl.querySelector<HTMLElement>('button'))?.focus({ preventScroll: true });
+  }
+
   onClose(): void {
+    document.removeEventListener('keydown', this.docKeydown, true);
     this.contentEl.empty();
     if (this.closedNotified) return;
     this.closedNotified = true;

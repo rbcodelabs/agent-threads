@@ -837,8 +837,9 @@ export class KanbanView extends ItemView {
   }
 
   /** Small "Archive suggestions (N)" entry shown inside the board's Concluded areas, only when N > 0. Folder and gallery modes never render it. */
-  private renderArchiveSuggestionsButton(parent: HTMLElement): void {
-    const n = this.archiveSuggestions().length;
+  private renderArchiveSuggestionsButton(parent: HTMLElement, scope: Thread[]): void {
+    // The count is this row's own candidates; the drawer it opens lists the whole board.
+    const n = archiveSuggestionCandidates(scope, (t) => this.isQuietForArchive(t), Date.now()).length;
     if (n === 0) return;
     const btn = parent.createEl('button', {
       cls: 'ct-kanban-concluded-show ct-kanban-archive-suggest',
@@ -861,8 +862,11 @@ export class KanbanView extends ItemView {
           const t = this.manager.getThread(id);
           return !!t && isKanbanThread(t) && archiveSuggestionCandidates([t], (x) => this.isQuietForArchive(x), Date.now()).length === 1;
         },
+        exists: (id) => !!this.manager.getThread(id),
         isOrchestrator: (id) => { const t = this.manager.getThread(id); return !t || this.isOrchestratorThread(t); },
         archiveThread: (id) => this.plugin.archiveThreadById(id, true),
+        // archiveThreadById does not persist; each caller saves once.
+        persist: () => this.plugin.saveSettings(),
       }),
       onClosed: () => this.renderKeepingFocus('kanban-archive-suggestions'),
     }).open();
@@ -900,7 +904,7 @@ export class KanbanView extends ItemView {
       attr: { type: 'button', 'aria-pressed': 'false', 'data-testid': 'kanban-show-concluded-toggle', title: 'Show concluded threads in their usual columns instead of collapsing them' },
     });
     showAll.addEventListener('click', () => this.setShowConcluded(true));
-    this.renderArchiveSuggestionsButton(row);
+    this.renderArchiveSuggestionsButton(row, quiet);
     if (!expanded) return;
     const body = row.createDiv('ct-kanban-concluded-body');
     for (const thread of sorted) this.renderCard(thread, this.rowStateFor(thread), body, placementKey);
@@ -934,7 +938,7 @@ export class KanbanView extends ItemView {
     btn.createSpan({ cls: 'ct-kanban-concluded-label', text: `Concluded shown (${n})` });
     btn.createSpan({ cls: 'ct-kanban-concluded-newest', text: 'Collapse' });
     btn.addEventListener('click', () => this.setShowConcluded(false));
-    this.renderArchiveSuggestionsButton(bar);
+    this.renderArchiveSuggestionsButton(bar, threads);
   }
 
   /** The card RowState a thread has by its own status, ignoring the Needs you lane. */

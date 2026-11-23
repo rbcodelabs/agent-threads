@@ -67,6 +67,7 @@ test.describe('board: archive suggestions', () => {
     await page.getByTestId('kanban-show-concluded-toggle').first().click(); // show concluded so the cards are visible
     await expect(card(page, 'Fix auth middleware 401s')).toHaveCount(1);
     await expect(card(page, 'Add rate limiting to /v1/search')).toHaveCount(1);
+    const savesBefore = await page.evaluate(() => (window as any).__getSaveSettingsCalls());
     await entry(page).click();
     await items(page).nth(1).locator('input').check(); // the 3d one
     await archiveBtn(page).click();
@@ -76,10 +77,13 @@ test.describe('board: archive suggestions', () => {
     expect(await archived(page)).toEqual([]);
     await expect(items(page)).toHaveCount(2);
     await expect(items(page).nth(1).locator('input')).toBeChecked();
+    expect(await page.evaluate(() => (window as any).__getSaveSettingsCalls())).toBe(savesBefore); // cancel persists nothing
 
     await archiveBtn(page).click();
     await page.getByRole('button', { name: 'Archive', exact: true }).click();
     await expect(page.getByTestId('archive-result')).toHaveText('Archived 1 thread.');
+    // archiveThreadById does not persist; the bulk run must save once.
+    expect(await page.evaluate(() => (window as any).__getSaveSettingsCalls())).toBe(savesBefore + 1);
     expect(await archived(page)).toEqual(['k-hiptrip-done']);
     await expect(items(page)).toHaveCount(1);
     if (shotDir) await page.screenshot({ path: path.join(shotDir, 'result-1280x800.png') });
@@ -101,6 +105,43 @@ test.describe('board: archive suggestions', () => {
     expect(await archived(page)).toEqual(['k-hiptrip-done']);
   });
 
+  const inDrawer = (page: Page) => page.evaluate(() => !!document.activeElement?.closest('.ct-archive-suggestions'));
+
+  for (const how of ['Escape', 'click outside'] as const) {
+    test(`dismissing the confirm with ${how} keeps the drawer open and Tab trapped inside it`, async ({ page }) => {
+      await open(page, { width: 1280, height: 800 });
+      await entry(page).click();
+      await items(page).nth(0).locator('input').check();
+      await archiveBtn(page).click();
+      await expect(page.locator('.modal-container', { hasText: 'Their notes are kept in the vault.' })).toHaveCount(1);
+      if (how === 'Escape') await page.keyboard.press('Escape');
+      else await page.mouse.click(5, 5);
+      await expect(page.locator('.modal-container', { hasText: 'Their notes are kept in the vault.' })).toHaveCount(0);
+      await expect(page.locator('.ct-archive-suggestions')).toHaveCount(1);
+      expect(await archived(page)).toEqual([]);
+      for (let i = 0; i < 8; i++) {
+        await page.keyboard.press('Tab');
+        expect(await inDrawer(page)).toBe(true);
+      }
+      await page.keyboard.press('Shift+Tab');
+      expect(await inDrawer(page)).toBe(true);
+      // Even if focus is dropped on <body> again, Tab comes back into the drawer.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await page.keyboard.press('Tab');
+      expect(await inDrawer(page)).toBe(true);
+    });
+  }
+
+  test('a thread deleted while the drawer is open is reported as no longer on the board', async ({ page }) => {
+    await open(page, { width: 1280, height: 800 });
+    await entry(page).click();
+    await page.getByTestId('archive-select-all').click();
+    await page.evaluate(() => (window as any).__manager.deleteThread('k-acme-done'));
+    await archiveBtn(page).click();
+    await page.getByRole('button', { name: 'Archive', exact: true }).click();
+    await expect(page.getByTestId('archive-result')).toHaveText('Archived 1 thread. 1 no longer on the board.');
+  });
+
   test('keyboard: focus moves in, Escape closes and focus returns to the entry', async ({ page }) => {
     await open(page, { width: 1280, height: 800 });
     await entry(page).focus();
@@ -117,7 +158,17 @@ test.describe('board: archive suggestions', () => {
 
   test('project columns and the Concluded-shown bar also offer the entry', async ({ page }) => {
     await open(page, { width: 1280, height: 800 }, 'quiet=1', 'project');
-    await expect(entry(page)).toHaveText('Archive suggestions (2)');
+    // Each project column shows its own count (HipTrip 1, acme-api 1); the Threads column has a quiet thread
+    // that is not yet 3 days old, so no entry; the drawer still lists the whole board.
+    const perColumn = await page.locator('.ct-kanban-project-col').evaluateAll((cols) => cols.map((c) => ({
+      col: c.querySelector('.ct-kanban-col-label')?.textContent ?? '',
+      entry: c.querySelector('[data-testid="kanban-archive-suggestions"]')?.textContent ?? null,
+    })));
+    expect(perColumn.filter((c) => c.entry !== null).map((c) => c.entry)).toEqual(['Archive suggestions (1)', 'Archive suggestions (1)']);
+    expect(perColumn.filter((c) => c.entry === null)).toHaveLength(1);
+    await entry(page).click();
+    await expect(items(page)).toHaveCount(2);
+    await page.keyboard.press('Escape');
     await page.getByTestId('kanban-show-concluded-toggle').first().click();
     await expect(page.getByTestId('kanban-concluded-shown').getByTestId('kanban-archive-suggestions').first()).toBeVisible();
     if (shotDir) await page.screenshot({ path: path.join(shotDir, 'project-shown-1280x800.png') });
