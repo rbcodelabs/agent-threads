@@ -828,12 +828,13 @@ export class KanbanView extends ItemView {
     });
     const chevron = head.createSpan('ct-expand-btn');
     setIcon(chevron, expanded ? 'chevron-down' : 'chevron-right');
+    head.dataset.expandKey = expandKey;
     head.createSpan({ cls: 'ct-kanban-concluded-label', text: `Concluded (${sorted.length})` });
     if (!expanded) head.createSpan({ cls: 'ct-kanban-concluded-newest', text: sorted[0].title });
     head.addEventListener('click', () => {
       if (this.expandedConcluded.has(expandKey)) this.expandedConcluded.delete(expandKey);
       else this.expandedConcluded.add(expandKey);
-      this.render();
+      this.renderKeepingFocus('kanban-concluded-toggle', expandKey);
     });
     const showAll = row.createEl('button', {
       cls: 'ct-kanban-concluded-show', text: 'Show in columns',
@@ -848,7 +849,16 @@ export class KanbanView extends ItemView {
   private setShowConcluded(on: boolean): void {
     this.plugin.settings.kanbanShowConcluded = on;
     void this.plugin.saveSettings();
+    this.renderKeepingFocus('kanban-show-concluded-toggle');
+  }
+
+  /** render() rebuilds the DOM, which drops keyboard focus; put it back on the same control (by test id, and expand key when given). */
+  private renderKeepingFocus(testId: string, expandKey?: string): void {
     this.render();
+    const sel = `[data-testid="${testId}"]`;
+    const candidates = Array.from(this.boardEl.querySelectorAll<HTMLElement>(sel));
+    const target = expandKey !== undefined ? candidates.find((el) => el.dataset.expandKey === expandKey) : candidates[0];
+    target?.focus({ preventScroll: true });
   }
 
   /** Shown while "Show concluded" is on and quiet-eligible threads are in their usual columns: the way back to collapsing. */

@@ -64,6 +64,19 @@ test.describe('board: quiet concluded threads', () => {
     await expect(row(page)).toHaveCount(1);
   });
 
+  test('keyboard focus stays on the row controls after activating them', async ({ page }) => {
+    await open(page, { width: 1280, height: 800 }, 'status');
+    await page.getByTestId('kanban-concluded-toggle').focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('kanban-concluded-toggle')).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('kanban-concluded-toggle')).toBeFocused();
+    await toggle(page).focus();
+    await page.keyboard.press('Enter');
+    await expect(toggle(page)).toBeFocused();
+    await expect(toggle(page)).toHaveAttribute('aria-pressed', 'true');
+  });
+
   test('search still finds quiet threads and shows them normally', async ({ page }) => {
     await open(page, { width: 1280, height: 800 }, 'status');
     await page.locator('.ct-agents-search-btn').click();
