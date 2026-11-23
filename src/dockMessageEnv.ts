@@ -16,15 +16,15 @@
  * `[[thread:id|Title]]` composes with the trusted pipeline by PRE-REWRITING (orchestratorDockModel.rewriteThreadLinks):
  * a resolvable marker becomes `[[thread:<id>|label]]`, which the shared renderer turns into its ordinary
  * `a.internal-link[data-href="thread:<id>"]` (label escaped, sanitized like every other anchor); an unresolvable one
- * becomes its plain label. The host's `openLinkText` recognises the `thread:` prefix (threadIdOfHref) and opens that
- * thread; the sheet's delegated hover handler uses the same attribute for the card highlight. No attacker-controlled
+ * becomes its plain label. The shared renderer owns `thread:` handling (host.resolveThread / host.openThread, never
+ * openLinkText); the sheet's delegated hover handler uses the same attribute for the card highlight. No attacker-controlled
  * text becomes an attribute: the id is one of the board's own thread ids, the label is escaped by the renderer.
  */
 import type { BridgeInfo } from './bridgeUtils';
 import type { ChatMessage } from './types';
 import { ToolCallRenderer, createToolCallExpandState, type MessageRenderHost } from './messageRenderer';
 import { DEFAULT_TOOL_CALL_STYLE, type ToolCallStyle, type ToolPathContext } from './toolNameUtils';
-import { threadIdOfHref } from './orchestratorDockModel';
+import { resolveThreadLink, type ThreadRef } from './orchestratorDockModel';
 
 /** What only the host app (the Agent Board) knows. Every member is optional except the vault probe. */
 export interface DockMessageHostDeps {
@@ -71,6 +71,8 @@ export interface DockMessageEnvInput {
   openNote(href: string): void;
   /** A `[[thread:<id>]]` link: opens that thread when the board knows it. */
   openThread(threadId: string): void;
+  /** The board's threads: the shared renderer resolves the sheet's pre-rewritten `[[thread:<id>|label]]` markers against them. */
+  threads(): readonly ThreadRef[];
   deps?: DockMessageHostDeps;
 }
 
@@ -99,10 +101,10 @@ export function createDockMessageEnv(input: DockMessageEnvInput): DockMessageEnv
         getThread: (id) => input.getThread(id),
         // Links resolve against nothing: the dock is not a note, and openDockLink resolves with ''.
         sourcePath: () => '',
-        openLinkText: (target) => {
-          const id = threadIdOfHref(target);
-          if (id) input.openThread(id); else input.openNote(target);
-        },
+        // `thread:` hrefs never get here: the shared renderer routes them to resolveThread / openThread below.
+        openLinkText: (target) => { input.openNote(target); },
+        resolveThread: (ref, label) => resolveThreadLink(ref, label, input.threads()),
+        openThread: (id) => input.openThread(id),
         openExternal: deps?.openExternal,
         confirmOutsideVault: (href) => deps?.confirmOutsideVault?.(href),
         vaultHas: (p) => deps?.vaultHas(p) ?? false,

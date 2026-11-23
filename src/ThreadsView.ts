@@ -20,7 +20,7 @@ import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import { isPermissionPreApprovedForThread, recordAlwaysAllow } from './remoteAlwaysAllow';
 import { contributionApprovalPredicate } from './contributedToolApproval';
 import type { ViewStateResult } from 'obsidian';
-import { renderMarkdown as renderSharedMarkdown, renderMessage, renderToolResultImages, linkifyUrls, ToolCallRenderer, type MessageRenderHost } from './messageRenderer';
+import { renderMarkdown as renderSharedMarkdown, renderMessage, renderToolResultImages, linkifyUrls, ToolCallRenderer, createThreadLinkHost, type MessageRenderHost } from './messageRenderer';
 import { isHttpUrl, urlChipLabel } from './urlLinks';
 import { effectiveExtraEnv } from './types';
 import { parseLoopArgs, formatLoopInterval } from './loopUtils';
@@ -3554,7 +3554,15 @@ export class ThreadsView extends ItemView {
    */
   private buildMessageRenderHost(): MessageRenderHost {
     const threadId = this.activeThreadId ?? undefined;
+    // `[[thread:id|Title]]` links: resolved against every thread (not Project-filtered), opened in the chat view.
+    const threadLinks = createThreadLinkHost({
+      threads: () => this.manager.getThreads(),
+      exists: (id) => !!this.manager.getThread(id),
+      open: (id) => { void this.plugin.openThreadInChatView(id); },
+      notify: (message) => { new Notice(message); },
+    });
     return {
+      ...threadLinks,
       signal: this.messageContentController?.signal ?? new AbortController().signal,
       threadId: () => threadId,
       getThread: (id) => this.manager.getThread(id),

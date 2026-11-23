@@ -25,6 +25,18 @@ export interface MessageRenderHost {
    */
   openLinkText(target: string, sourcePath?: string): void;
   /**
+   * Resolve a `[[thread:<ref>|label]]` marker against the threads this surface knows (id first, then unique title; see
+   * resolveThreadLink). Omit it (mobile, which has no thread manager) and every thread marker renders as its plain
+   * label. Called at render time, so a renamed thread still resolves by id.
+   */
+  resolveThread?(ref: string, label: string): { threadId: string; title: string } | null;
+  /**
+   * Open a thread from a clicked thread link. A `thread:` href NEVER reaches `openLinkText`, even when this is
+   * omitted (the click then does nothing). The surface decides what "open" means and handles a thread that was
+   * archived between render and click.
+   */
+  openThread?(threadId: string): void;
+  /**
    * Open an http(s) URL. When omitted the surface keeps the browser's default
    * anchor behavior and bare URLs in text are not linkified (mobile).
    */
