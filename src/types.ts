@@ -92,6 +92,12 @@ export interface PendingDecision {
   options: AskQuestionOption[];
   multiSelect: boolean;
   allowOther: boolean;
+  /**
+   * Label of the option the posting orchestrator recommends. Always equal to
+   * one of `options[].label`; absent when no recommendation was made and on
+   * decisions persisted before this field existed.
+   */
+  recommended?: string;
   createdAt: number;
   /** The orchestrator thread that posted this decision and receives the answer. */
   sourceThreadId: string;

@@ -125,7 +125,7 @@ describe('checked-in consumer declaration', () => {
     const expected = [
       ...Object.entries(runtimeSurface())
         .flatMap(([namespace, methods]) => namespace === 'agentTools' ? ['agentTools.voice-orchestration'] : methods.map(method => `${namespace}.${method}`)),
-      'artifacts.visibleStorage', 'help.docRoots',
+      'artifacts.visibleStorage', 'help.docRoots', 'threads.pendingDecisions',
     ].sort();
     expect([...api.capabilities].sort()).toEqual(expected);
   });
