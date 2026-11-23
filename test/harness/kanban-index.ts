@@ -79,6 +79,22 @@ if (new URLSearchParams(window.location.search).has('inbox')) {
   const noted = byTitle('Fix auth middleware 401s');
   if (noted) noted.managerNotes = 'Goal: fix 401s\nStatus: done, PR merged';
 }
+// ?quiet=1 concludes three threads 3 days ago with a matching v2 cursor so they go quiet (Concluded row), and gives a
+// failed thread the same notes to show crashes never quiet. Times are relative to the page clock, set once at load.
+if (new URLSearchParams(window.location.search).has('quiet')) {
+  const byId = (id: string) => kanbanFixtureThreads.find(thread => thread.id === id);
+  const conclude = (id: string, ageMs: number) => {
+    const t = byId(id);
+    if (!t) return;
+    t.updatedAt = Date.now() - ageMs;
+    t.managerNotes = ['Orchestrator state: v2', 'Thread outcome: shipped', 'Disposition: concluded', `Last reviewed update: ${t.updatedAt}`].join('\n');
+  };
+  const DAY = 24 * 60 * 60_000;
+  conclude('k-hiptrip-done', 3 * DAY);
+  conclude('k-threads-new', 2 * DAY);
+  conclude('k-acme-done', 4 * DAY);
+  conclude('k-threads-failed', 5 * DAY);
+}
 // ?tray=1 seeds the sheet's Needs-you tray with one of each kind (the awaiting-permission thread already exists on the
 // board; this adds a pending question and a pending plan); ?tray=many adds two more questions (5 items: the tray collapses).
 const trayFixture = new URLSearchParams(window.location.search).get('tray');

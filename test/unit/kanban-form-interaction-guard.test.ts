@@ -41,6 +41,7 @@ function makeView(threads: Thread[], running: Set<string>) {
     isAwaitingSandboxDecision: () => false,
     getThreadActivity: () => 'Working...',
     getProject: () => undefined,
+    getProjects: () => [],
     subscribe: () => () => {},
   };
   const plugin = {

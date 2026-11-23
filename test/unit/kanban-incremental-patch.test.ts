@@ -59,6 +59,7 @@ function makeManager(threads: Thread[], running: Set<string>) {
     isAwaitingSandboxDecision: () => false,
     getThreadActivity: () => 'Working...',
     getProject: () => undefined,
+    getProjects: () => [],
     subscribe: () => () => {},
   };
 }

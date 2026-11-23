@@ -32,6 +32,7 @@ import { attachStackArchiveMenu, attachThreadArchiveMenu, type ArchiveMenuDeps }
 import { promptConfirm } from './confirmModal';
 import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
 import { nextKanbanGroupBy, normalizeKanbanGroupBy } from './kanbanGroupBy';
+import { isQuietThread, partitionQuiet } from './quietThreads';
 import type { KanbanGroupBy } from './types';
 import { buildGalleryImages, type GalleryImage } from './galleryImages';
 import { GalleryCard, type GalleryCardModel, type GalleryStatusKind } from './galleryCard';
@@ -58,6 +59,7 @@ type ThreadGroupEntry = { key: string; label: string; threads: Thread[] };
 
 /** Group key + display label for a thread's app/project, used by folder grouping. */
 const UNASSIGNED_GROUP = 'Unassigned';
+const CONCLUDED_LABEL = 'Concluded';
 
 /**
  * Kanban column labels eligible for scheduled-thread stacking. These are the
@@ -151,6 +153,8 @@ export class KanbanView extends ItemView {
   private notesEls: Map<string, HTMLElement> = new Map();
   private needsYouOnlyBtn!: HTMLButtonElement;
   private needsYouOnly = false;
+  /** Concluded rows the user expanded: 'status' or a project column key. In memory only. */
+  private expandedConcluded = new Set<string>();
   private activeThreadId: string | null = null;
 
   // ── Gallery mode ──────────────────────────────────────────────────────────
@@ -775,6 +779,103 @@ export class KanbanView extends ItemView {
     return threadNeedsInput(thread, this.manager.hasPendingQuestion(thread.id));
   }
 
+  /**
+   * Quieting applies only to the status and project-columns boards, and is
+   * suspended while searching (matches render normally) or when "Show
+   * concluded" is on. Folder swimlanes and gallery are deliberately untouched.
+   */
+  private quietingActive(ignoreToggle = false): boolean {
+    if ((!ignoreToggle && this.plugin.settings.kanbanShowConcluded === true) || this.searchQuery) return false;
+    const mode = this.groupBy;
+    return mode === 'status' || mode === 'project';
+  }
+
+  private isOrchestratorThread(thread: Thread): boolean {
+    if (thread.id === this.plugin.settings.orchestratorThreadId) return true;
+    return this.manager.getProjects().some((p) => p.orchestratorThreadId === thread.id);
+  }
+
+  private isQuiet(thread: Thread, ignoreToggle = false): boolean {
+    if (!this.quietingActive(ignoreToggle)) return false;
+    const m = this.manager;
+    return isQuietThread(thread, {
+      isRunning: m.isRunning(thread.id),
+      hasActiveBackgroundTasks: m.hasActiveBackgroundTasks(thread.id),
+      hasPendingQuestion: m.hasPendingQuestion(thread.id),
+      hasPendingPermission: m.hasPendingPermission(thread.id),
+      hasPendingPlan: m.hasPendingPlan(thread.id),
+      hasPendingWakeup: this.plugin.hasPendingWakeup(thread.id),
+      isOrchestrator: this.isOrchestratorThread(thread),
+    }, Date.now());
+  }
+
+  private splitQuiet(threads: Thread[]): { quiet: Thread[]; rest: Thread[] } {
+    return partitionQuiet(threads, (t) => this.isQuiet(t));
+  }
+
+  /**
+   * One collapsed "Concluded (N)" row (newest title shown while collapsed);
+   * click expands it into ordinary cards. `expandKey` identifies the row in
+   * `expandedConcluded`; `placementKey` is the card placement key used when expanded.
+   */
+  private renderConcludedRow(parent: HTMLElement, quiet: Thread[], expandKey: string, placementKey: string): void {
+    const sorted = quiet.slice().sort((a, b) => b.updatedAt - a.updatedAt);
+    const expanded = this.expandedConcluded.has(expandKey);
+    const row = parent.createDiv({ cls: 'ct-kanban-concluded', attr: { 'data-testid': 'kanban-concluded-row' } });
+    const head = row.createEl('button', {
+      cls: 'ct-kanban-concluded-head',
+      attr: { type: 'button', 'aria-expanded': String(expanded), 'data-testid': 'kanban-concluded-toggle' },
+    });
+    const chevron = head.createSpan('ct-expand-btn');
+    setIcon(chevron, expanded ? 'chevron-down' : 'chevron-right');
+    head.dataset.expandKey = expandKey;
+    head.createSpan({ cls: 'ct-kanban-concluded-label', text: `Concluded (${sorted.length})` });
+    if (!expanded) head.createSpan({ cls: 'ct-kanban-concluded-newest', text: sorted[0].title });
+    head.addEventListener('click', () => {
+      if (this.expandedConcluded.has(expandKey)) this.expandedConcluded.delete(expandKey);
+      else this.expandedConcluded.add(expandKey);
+      this.renderKeepingFocus('kanban-concluded-toggle', expandKey);
+    });
+    const showAll = row.createEl('button', {
+      cls: 'ct-kanban-concluded-show', text: 'Show in columns',
+      attr: { type: 'button', 'aria-pressed': 'false', 'data-testid': 'kanban-show-concluded-toggle', title: 'Show concluded threads in their usual columns instead of collapsing them' },
+    });
+    showAll.addEventListener('click', () => this.setShowConcluded(true));
+    if (!expanded) return;
+    const body = row.createDiv('ct-kanban-concluded-body');
+    for (const thread of sorted) this.renderCard(thread, this.rowStateFor(thread), body, placementKey);
+  }
+
+  private setShowConcluded(on: boolean): void {
+    this.plugin.settings.kanbanShowConcluded = on;
+    void this.plugin.saveSettings();
+    this.renderKeepingFocus('kanban-show-concluded-toggle');
+  }
+
+  /** render() rebuilds the DOM, which drops keyboard focus; put it back on the same control (by test id, and expand key when given). */
+  private renderKeepingFocus(testId: string, expandKey?: string): void {
+    this.render();
+    const sel = `[data-testid="${testId}"]`;
+    const candidates = Array.from(this.boardEl.querySelectorAll<HTMLElement>(sel));
+    const target = expandKey !== undefined ? candidates.find((el) => el.dataset.expandKey === expandKey) : candidates[0];
+    target?.focus({ preventScroll: true });
+  }
+
+  /** Shown while "Show concluded" is on and quiet-eligible threads are in their usual columns: the way back to collapsing. */
+  private renderConcludedShownBar(parent: HTMLElement, threads: Thread[]): void {
+    if (this.plugin.settings.kanbanShowConcluded !== true) return;
+    const n = partitionQuiet(threads, (t) => this.isQuiet(t, true)).quiet.length;
+    if (n === 0) return;
+    const bar = parent.createDiv({ cls: 'ct-kanban-concluded', attr: { 'data-testid': 'kanban-concluded-shown' } });
+    const btn = bar.createEl('button', {
+      cls: 'ct-kanban-concluded-head',
+      attr: { type: 'button', 'aria-pressed': 'true', 'data-testid': 'kanban-show-concluded-toggle', title: 'Collapse concluded threads again' },
+    });
+    btn.createSpan({ cls: 'ct-kanban-concluded-label', text: `Concluded shown (${n})` });
+    btn.createSpan({ cls: 'ct-kanban-concluded-newest', text: 'Collapse' });
+    btn.addEventListener('click', () => this.setShowConcluded(false));
+  }
+
   /** The card RowState a thread has by its own status, ignoring the Needs you lane. */
   private rowStateFor(thread: Thread): RowState {
     return STATUS_COLUMN_MAP[classifyThreadRow(this.rowFlags(thread))].state;
@@ -824,11 +925,21 @@ export class KanbanView extends ItemView {
   private renderStatusBoard(threads: Thread[]): void {
     const board = this.boardEl.createDiv('ct-kanban-board');
     board.dataset.scrollKey = '__board__';
-    const cols = this.bucketize(threads, true);
+    const { quiet, rest } = this.splitQuiet(threads);
+    const cols = this.bucketize(rest, true);
     for (const col of cols) {
       const alwaysShow = col.label === 'Working' || col.label === 'New';
       if (!alwaysShow && col.threads.length === 0) continue;
       this.renderColumn(board, col.label, col.threads, col.state, col.accentClass, col.badge, col.label);
+    }
+    if (quiet.length > 0) {
+      const lane = board.createDiv('ct-kanban-col ct-kanban-col-concluded');
+      const body = lane.createDiv('ct-kanban-col-body');
+      body.dataset.scrollKey = CONCLUDED_LABEL;
+      this.renderConcludedRow(body, quiet, 'status', CONCLUDED_LABEL);
+    } else if (this.plugin.settings.kanbanShowConcluded === true && partitionQuiet(threads, (t) => this.isQuiet(t, true)).quiet.length > 0) {
+      const lane = board.createDiv('ct-kanban-col ct-kanban-col-concluded');
+      this.renderConcludedShownBar(lane.createDiv('ct-kanban-col-body'), threads);
     }
   }
 
@@ -932,8 +1043,9 @@ export class KanbanView extends ItemView {
     const body = col.createDiv('ct-kanban-col-body');
     body.dataset.scrollKey = `project::${groupKey}`;
 
-    const sections = this.sectionsForColumn(threads);
-    if (sections.length === 0) {
+    const { quiet, rest } = this.splitQuiet(threads);
+    const sections = this.sectionsForColumn(rest);
+    if (sections.length === 0 && quiet.length === 0) {
       body.createDiv({ cls: 'ct-kanban-col-empty', text: 'Nothing here' });
       return;
     }
@@ -946,6 +1058,11 @@ export class KanbanView extends ItemView {
         labelEl.createSpan({ cls: 'ct-agents-group-badge ct-kanban-badge', text: String(section.badge) });
       }
       this.populateCardBody(sectionEl, section.threads, section.state, section.label, `${groupKey}::${section.label}`);
+    }
+    if (quiet.length > 0) {
+      this.renderConcludedRow(body, quiet, groupKey, `${groupKey}::${CONCLUDED_LABEL}`);
+    } else {
+      this.renderConcludedShownBar(body, threads);
     }
   }
 
@@ -1750,6 +1867,13 @@ export class KanbanView extends ItemView {
     const rowState = classifyThreadRow(this.rowFlags(thread));
 
     const mode = this.groupBy;
+    // Quiet threads live in the collapsed Concluded row; crossing that boundary is a rebuild.
+    if (this.isQuiet(thread)) {
+      return {
+        bucketKey: mode === 'project' ? `${this.threadGroup(thread).key}::${CONCLUDED_LABEL}` : CONCLUDED_LABEL,
+        state: STATUS_COLUMN_MAP[rowState].state,
+      };
+    }
     if (mode === 'gallery') {
       // Gallery has its own stable keys: the featured area vs the grid. Moving
       // between them (a thread starts or stops needing the user) is a rebuild.
@@ -2048,7 +2172,8 @@ export class KanbanView extends ItemView {
       this.scheduleRender();
       return;
     }
-    if (type !== 'manager_notes_changed') {
+    // Manager notes too: a concluded cursor can move a card into the Concluded row.
+    {
       const next = this.computeCardPlacement(thread);
       if (next.bucketKey !== recorded.bucketKey || next.state !== recorded.state) {
         this.scheduleRender();
