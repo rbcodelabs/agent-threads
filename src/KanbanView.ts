@@ -32,7 +32,9 @@ import { attachStackArchiveMenu, attachThreadArchiveMenu, type ArchiveMenuDeps }
 import { promptConfirm } from './confirmModal';
 import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
 import { nextKanbanGroupBy, normalizeKanbanGroupBy } from './kanbanGroupBy';
-import { isQuietThread, partitionQuiet } from './quietThreads';
+import { isQuietThread, partitionQuiet, type QuietLiveFlags } from './quietThreads';
+import { archiveSuggestionCandidates, runBulkArchive, type ArchiveSuggestion, type SuggestionThreadFacts } from './archiveSuggestions';
+import { ArchiveSuggestionsModal } from './archiveSuggestionsModal';
 import type { KanbanGroupBy } from './types';
 import { buildGalleryImages, type GalleryImage } from './galleryImages';
 import { GalleryCard, type GalleryCardModel, type GalleryStatusKind } from './galleryCard';
@@ -795,10 +797,9 @@ export class KanbanView extends ItemView {
     return this.manager.getProjects().some((p) => p.orchestratorThreadId === thread.id);
   }
 
-  private isQuiet(thread: Thread, ignoreToggle = false): boolean {
-    if (!this.quietingActive(ignoreToggle)) return false;
+  private quietFlags(thread: Thread): QuietLiveFlags {
     const m = this.manager;
-    return isQuietThread(thread, {
+    return {
       isRunning: m.isRunning(thread.id),
       hasActiveBackgroundTasks: m.hasActiveBackgroundTasks(thread.id),
       hasPendingQuestion: m.hasPendingQuestion(thread.id),
@@ -806,7 +807,69 @@ export class KanbanView extends ItemView {
       hasPendingPlan: m.hasPendingPlan(thread.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(thread.id),
       isOrchestrator: this.isOrchestratorThread(thread),
-    }, Date.now());
+    };
+  }
+
+  private isQuiet(thread: Thread, ignoreToggle = false): boolean {
+    if (!this.quietingActive(ignoreToggle)) return false;
+    return isQuietThread(thread, this.quietFlags(thread), Date.now());
+  }
+
+  /** Board-view independent: quiet by the predicate alone (used for archive suggestions and the confirm-time re-check). */
+  private isQuietForArchive(thread: Thread): boolean {
+    return isQuietThread(thread, this.quietFlags(thread), Date.now());
+  }
+
+  private archiveSuggestions(): ArchiveSuggestion<Thread>[] {
+    return archiveSuggestionCandidates(
+      this.manager.getThreads().filter(isKanbanThread),
+      (t) => this.isQuietForArchive(t),
+      Date.now(),
+    );
+  }
+
+  private suggestionProjectLabel(thread: SuggestionThreadFacts): string {
+    const t = this.manager.getThread(thread.id);
+    const project = t?.projectId ? this.manager.getProjects().find((p) => p.id === t.projectId) : undefined;
+    if (project) return project.name;
+    const cwd = (t?.cwd ?? '').replace(/\/+$/, '');
+    return cwd ? cwd.slice(cwd.lastIndexOf('/') + 1) : 'No project';
+  }
+
+  /** Small "Archive suggestions (N)" entry shown inside the board's Concluded areas, only when N > 0. Folder and gallery modes never render it. */
+  private renderArchiveSuggestionsButton(parent: HTMLElement, scope: Thread[]): void {
+    // The count is this row's own candidates; the drawer it opens lists the whole board.
+    const n = archiveSuggestionCandidates(scope, (t) => this.isQuietForArchive(t), Date.now()).length;
+    if (n === 0) return;
+    const btn = parent.createEl('button', {
+      cls: 'ct-kanban-concluded-show ct-kanban-archive-suggest',
+      text: `Archive suggestions (${n})`,
+      attr: { type: 'button', 'data-testid': 'kanban-archive-suggestions', title: 'Review concluded threads that are safe to archive' },
+    });
+    btn.addEventListener('click', () => this.openArchiveSuggestions());
+  }
+
+  private openArchiveSuggestions(): void {
+    new ArchiveSuggestionsModal(this.app, {
+      getCandidates: () => this.archiveSuggestions(),
+      projectLabel: (t) => this.suggestionProjectLabel(t),
+      archiveSelected: (ids) => runBulkArchive(ids, {
+        confirm: () => promptConfirm(this.app, {
+          message: `Archive ${ids.length} thread${ids.length === 1 ? '' : 's'}? Their notes are kept in the vault.`,
+          confirmLabel: 'Archive',
+        }),
+        isStillEligible: (id) => {
+          const t = this.manager.getThread(id);
+          return !!t && isKanbanThread(t) && archiveSuggestionCandidates([t], (x) => this.isQuietForArchive(x), Date.now()).length === 1;
+        },
+        exists: (id) => !!this.manager.getThread(id),
+        isOrchestrator: (id) => { const t = this.manager.getThread(id); return !t || this.isOrchestratorThread(t); },
+        archiveThread: (id) => this.plugin.archiveThreadById(id, true),
+        // archiveThreadById does not persist; each caller saves once.
+        persist: () => this.plugin.saveSettings(),
+      }),
+      onClosed: () => this.renderKeepingFocus('kanban-archive-suggestions'),
+    }).open();
   }
 
   private splitQuiet(threads: Thread[]): { quiet: Thread[]; rest: Thread[] } {
@@ -841,6 +904,7 @@ export class KanbanView extends ItemView {
       attr: { type: 'button', 'aria-pressed': 'false', 'data-testid': 'kanban-show-concluded-toggle', title: 'Show concluded threads in their usual columns instead of collapsing them' },
     });
     showAll.addEventListener('click', () => this.setShowConcluded(true));
+    this.renderArchiveSuggestionsButton(row, quiet);
     if (!expanded) return;
     const body = row.createDiv('ct-kanban-concluded-body');
     for (const thread of sorted) this.renderCard(thread, this.rowStateFor(thread), body, placementKey);
@@ -874,6 +938,7 @@ export class KanbanView extends ItemView {
     btn.createSpan({ cls: 'ct-kanban-concluded-label', text: `Concluded shown (${n})` });
     btn.createSpan({ cls: 'ct-kanban-concluded-newest', text: 'Collapse' });
     btn.addEventListener('click', () => this.setShowConcluded(false));
+    this.renderArchiveSuggestionsButton(bar, threads);
   }
 
   /** The card RowState a thread has by its own status, ignoring the Needs you lane. */

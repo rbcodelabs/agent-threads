@@ -93,6 +93,8 @@ if (new URLSearchParams(window.location.search).has('quiet')) {
   conclude('k-hiptrip-done', 3 * DAY);
   conclude('k-threads-new', 2 * DAY);
   conclude('k-acme-done', 4 * DAY);
+  const acme = byId('k-acme-done');
+  if (acme) acme.prUrl = 'https://github.com/acme/app/pull/321';
   conclude('k-threads-failed', 5 * DAY);
 }
 // ?tray=1 seeds the sheet's Needs-you tray with one of each kind (the awaiting-permission thread already exists on the

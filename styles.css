@@ -11896,3 +11896,20 @@ button.ct-agent-crumb:focus-visible {
   }
 }
 /* ══ end Settings → Agent ═══════════════════════════════════════════════════ */
+
+/* Archive suggestions drawer (opened from the Concluded row; never from the dock toolbar). */
+.ct-kanban-archive-suggest { color: var(--text-accent); }
+.ct-archive-suggestions { display: flex; flex-direction: column; gap: 8px; max-width: 100%; }
+.ct-archive-suggestions-title { margin: 0; font-size: var(--font-ui-large); }
+.ct-archive-suggestions-sub { margin: 0; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.ct-archive-suggestions-tools, .ct-archive-suggestions-footer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ct-archive-suggestions-footer { justify-content: flex-end; }
+.ct-archive-suggestions-tools button, .ct-archive-suggestions-footer button { min-height: 32px; }
+.ct-archive-suggestions-list { display: flex; flex-direction: column; gap: 2px; max-height: 45vh; overflow-y: auto; border: 1px solid var(--background-modifier-border); border-radius: 6px; }
+.ct-archive-suggestions-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px; cursor: pointer; min-height: 44px; }
+.ct-archive-suggestions-item:hover { background: var(--background-modifier-hover); }
+.ct-archive-suggestions-text { min-width: 0; flex: 1; }
+.ct-archive-suggestions-item-title { overflow-wrap: anywhere; font-weight: 500; }
+.ct-archive-suggestions-item-meta { color: var(--text-muted); font-size: var(--font-ui-smaller); overflow-wrap: anywhere; }
+.ct-archive-suggestions-empty { padding: 12px; color: var(--text-muted); }
+.ct-archive-suggestions-status { min-height: 1.2em; color: var(--text-muted); font-size: var(--font-ui-smaller); }
