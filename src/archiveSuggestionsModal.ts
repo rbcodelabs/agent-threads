@@ -120,6 +120,8 @@ export class ArchiveSuggestionsModal extends Modal {
     } finally {
       this.busy = false;
       this.refresh();
+      // The confirm dialog and the re-render both drop focus; put it back inside the drawer.
+      (this.listEl.querySelector<HTMLElement>('input') ?? this.contentEl.querySelector<HTMLElement>('button'))?.focus({ preventScroll: true });
     }
   }
 
