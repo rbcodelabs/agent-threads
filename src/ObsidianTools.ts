@@ -8,7 +8,7 @@ import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { HarnessDynamicTool } from './HarnessSession';
 import { App, TFile } from 'obsidian';
-import type { PendingDecision, ScheduledItem } from './types';
+import type { AgentRun, PendingDecision, ScheduledItem } from './types';
 import type { SchedulerItemPatch } from './Scheduler';
 import type { OrchestratorSnapshot } from './PublicApi';
 import path from 'path';
@@ -240,6 +240,11 @@ export interface ObsidianMcpServerOptions {
   getOrchestratorThreadId?: () => string | undefined;
   /** Returns whether a thread is any referenced portfolio or Project orchestrator. */
   isOrchestratorThread?: (threadId: string) => boolean;
+  /**
+   * Returns the agent runs (subagents) the plugin tracks for a thread. Read-only. `threads_list_subagents`
+   * only ever calls it with this session's own `threadId`; it never takes a thread id from the model.
+   */
+  getAgentRuns?: (threadId: string) => AgentRun[];
   /** Returns full detail (metadata + messages) for a thread by ID. */
   getThreadDetail?: (id: string) => ThreadDetail | undefined;
   /** Opens and focuses a thread by ID through the host UI. */
@@ -678,7 +683,7 @@ export function toHarnessDynamicTools(
   const readOnlyToolNames = new Set([
     ...legacyReadOnlyToolNames,
     // Canonical-only sync and thread-inspection tools (no legacy alias); sync_resolve_conflict is deliberately absent: it mutates.
-    'sync_list_conflicts', 'sync_inspect_conflict', 'threads_get', 'threads_get_ledger',
+    'sync_list_conflicts', 'sync_inspect_conflict', 'threads_get', 'threads_get_ledger', 'threads_list_subagents',
     ...legacyReadOnlyToolNames.map(name => LEGACY_TO_CANONICAL_TOOL_NAMES[name] ?? name),
     // Observing a page is read-only; navigating to one and clicking things is
     // not, so only the inspection half bypasses the prompt.

@@ -10,6 +10,7 @@ import { isValidOverviewPath } from '../projectOverview';
 import { parseManagerNotesTriage } from '../orchestratorCharter';
 import type { ObsidianMcpServerOptions, ProjectUpdatePatch } from '../ObsidianTools';
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
+import { buildSubagentList, MAX_SUBAGENTS } from '../agentRuns/subagentSnapshot';
 
 type ToolDef = SdkMcpToolDefinition<any>;
 
@@ -22,7 +23,7 @@ const ELEVATION_NOTES_DESC =
   'If its orchestrator is enabled the write is denied: hand off with threads_send_message (same elevatedProjectId) so the owner writes it.';
 
 export interface ThreadToolsPort {
-  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeOrchestratorManagement' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadDecision' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'explainNotesDenial' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorLedger' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'listOrchestrators' | 'openThread' | 'postThreadDecision' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setOrchestratorLedger' | 'setProjectOrchestratorEnabled' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
+  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeOrchestratorManagement' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadDecision' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'explainNotesDenial' | 'getAgentRuns' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorLedger' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'listOrchestrators' | 'openThread' | 'postThreadDecision' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setOrchestratorLedger' | 'setProjectOrchestratorEnabled' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
 }
 
 
@@ -94,6 +95,32 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         }
         const { messages: _msgs, ...meta } = detail;
         return { content: [{ type: 'text' as const, text: JSON.stringify(meta, null, 2) }] };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true };
+      }
+    },
+    { alwaysLoad: true },
+  );
+
+  const boundListSubagents = tool(
+    'threads_list_subagents',
+    [
+      'Lists the subagents (background agents) spawned by THIS thread, most recently updated first, so you can recover an agent ID after context compaction or an interruption. Read-only, takes no arguments, and only ever returns the calling thread\'s own agents.',
+      `Each entry has: id and nativeAgentId (the ID to pass to SendMessage and TaskStop), taskId, description, role (subagent type), model, harness, status, statusKnown, storedStatus, startedAt, updatedAt, completedAt, parentAgentRunId, parentNativeAgentId, currentActivity, resultSummary and error (long text is truncated). At most ${MAX_SUBAGENTS} are returned; truncated is true and total shows the stored count when more exist.`,
+      'status is the LAST KNOWN lifecycle state as recorded by the plugin, not a live probe: starting, working and waiting mean the agent was last seen active; completed, failed and interrupted are terminal.',
+      'status is "unknown" (statusKnown false) when the state cannot be established: a stored status of "unavailable" (the agent was active when the thread was saved and its session is no longer live), a missing status, or a value this build does not recognise. An unknown agent is never reported as running or completed; storedStatus shows the raw value.',
+      'An empty thread returns { subagents: [], count: 0, truncated: false }.',
+    ].join(' '),
+    {},
+    async (_args, _extra) => {
+      try {
+        const { threadId } = options;
+        if (!threadId || !options.getAgentRuns) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Subagent state not available in this context.' }) }], isError: true };
+        }
+        const list = buildSubagentList(threadId, options.getAgentRuns(threadId));
+        return { content: [{ type: 'text' as const, text: JSON.stringify(list, null, 2) }] };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true };
@@ -797,6 +824,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     boundCreateThread as ToolDef | undefined,
     boundGetCurrentThread as ToolDef | undefined,
     boundGetThread as ToolDef | undefined,
+    boundListSubagents as ToolDef | undefined,
     boundListThreads as ToolDef | undefined,
     boundListProjects as ToolDef | undefined,
     boundCreateProject as ToolDef | undefined,
@@ -822,6 +850,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     'threads_create',
     'obsidian_get_current_thread',
     'threads_get',
+    'threads_list_subagents',
     'obsidian_list_threads',
     'obsidian_list_projects',
     'obsidian_create_project',

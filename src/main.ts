@@ -930,6 +930,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
             const role = resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, this.manager.getProjects());
             return authorizeProjectAssignment(role, projectId, { isSelf: targetThreadId === threadId, elevatedProjectId });
           },
+          getAgentRuns: (id: string) => this.manager.getAgentRuns(id),
           getThreadDetail: (id: string) => {
             const t = this.manager.getThread(id);
             if (!t) return undefined;

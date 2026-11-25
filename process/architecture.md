@@ -168,6 +168,8 @@ When adding a field to `Thread`:
 2. Add it to both serializers in `main.ts`: `getThreadDetail` and `getAllThreads`
 3. Update the tool description strings in `ObsidianTools.ts` to mention the new field
 
+`threads_list_subagents` is the model for a read-only, own-thread tool: its pure projection lives in `src/agentRuns/subagentSnapshot.ts` (no store access, no mutation), the handler in `src/tools/threads.ts` reads only `options.threadId` (never a model-supplied id) through the `getAgentRuns` option wired in `main.ts` to `ThreadManager.getAgentRuns`, and it is canonical-only (no `obsidian_` alias, like `threads_get`). Status is passed through only for the states the store observes live; `unavailable`, a missing value or an unrecognised value become `unknown` / `statusKnown: false`.
+
 ---
 
 ## New-conversation mode
