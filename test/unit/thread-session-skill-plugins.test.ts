@@ -47,8 +47,11 @@ describe('ThreadSession.start() — skill plugin paths', () => {
   });
 
   it('ignores a leftover legacy claude.vm routing input from older callers', async () => {
+    await start({ sessionOptions: { plugins: hostPlugins } });
     await start({ vm: { mode: 'always', image: 'img' }, sessionOptions: { plugins: hostPlugins } });
-    expect(queryCalls[0].options.plugins).toEqual(hostPlugins);
-    expect(queryCalls[0].options).not.toHaveProperty('spawnClaudeCodeProcess');
+    expect(queryCalls[1].options.plugins).toEqual(hostPlugins);
+    // Both runs use the host process-group spawner; legacy `claude.vm` has no effect.
+    expect(typeof (queryCalls[1].options as { spawnClaudeCodeProcess?: unknown }).spawnClaudeCodeProcess).toBe('function');
+    expect(Object.keys(queryCalls[1].options).sort()).toEqual(Object.keys(queryCalls[0].options).sort());
   });
 });
