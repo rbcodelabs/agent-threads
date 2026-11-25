@@ -69,7 +69,7 @@ export const TOOL_NAMES_BY_DOMAIN: Readonly<Record<ToolDomain, readonly string[]
     'watch_document', 'unwatch_document', 'list_watched_documents',
   ],
   threads: [
-    'threads_create', 'obsidian_get_current_thread', 'threads_get', 'obsidian_list_threads', 'obsidian_list_projects',
+    'threads_create', 'obsidian_get_current_thread', 'threads_get', 'threads_list_subagents', 'obsidian_list_threads', 'obsidian_list_projects',
     'obsidian_create_project', 'obsidian_update_project', 'obsidian_set_thread_project', 'obsidian_get_thread_messages',
     'obsidian_open_thread', 'obsidian_get_thread_log', 'obsidian_wait_for_thread', 'obsidian_send_message_to_thread',
     'obsidian_archive_thread', 'obsidian_set_thread_notes', 'obsidian_set_thread_proposed_reply',
@@ -103,7 +103,7 @@ export const BUILT_IN_TOOL_ORDER: readonly string[] = Object.freeze([
   'vault_list', 'set_working_directory', 'ScheduleWakeup', 'watch_document', 'unwatch_document',
   'list_watched_documents', 'enter_worktree', 'exit_worktree', 'host_exec',
   'github_list_access', 'github_check_repo', 'obsidian_list_commands', 'obsidian_execute_command',
-  'threads_create', 'obsidian_get_current_thread', 'threads_get', 'obsidian_list_threads', 'obsidian_list_projects',
+  'threads_create', 'obsidian_get_current_thread', 'threads_get', 'threads_list_subagents', 'obsidian_list_threads', 'obsidian_list_projects',
   'obsidian_create_project', 'obsidian_update_project', 'obsidian_set_thread_project', 'obsidian_get_thread_messages',
   'obsidian_open_thread', 'obsidian_get_thread_log', 'obsidian_wait_for_thread', 'obsidian_send_message_to_thread',
   'obsidian_archive_thread', 'obsidian_set_thread_notes', 'obsidian_set_thread_proposed_reply',

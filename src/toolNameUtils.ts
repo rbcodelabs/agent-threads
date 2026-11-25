@@ -175,7 +175,7 @@ const CANONICAL_BUILT_IN_TOOLS = new Set([
   'sync_list_conflicts', 'sync_inspect_conflict', 'agent_threads_help',
   'workspace_get_active_file', 'workspace_get_open_tabs', 'workspace_navigate_to_file',
   'workspace_insert_at_cursor', 'host_list_commands', 'host_execute_command', 'host_open_url',
-  'threads_get_current', 'threads_get', 'threads_list', 'threads_create', 'threads_list_projects', 'threads_create_project', 'threads_update_project',
+  'threads_get_current', 'threads_get', 'threads_list_subagents', 'threads_list', 'threads_create', 'threads_list_projects', 'threads_create_project', 'threads_update_project',
   'threads_set_project', 'threads_get_messages', 'threads_get_log', 'threads_wait',
   'threads_open',
   'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_proposed_reply',
